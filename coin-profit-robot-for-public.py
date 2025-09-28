@@ -1,3 +1,4 @@
+```python
 import os
 import time
 import csv
@@ -38,6 +39,7 @@ PRINT_DATABASE = True  # Set to True to view cryptos to sell
 DEBUG = False  # Set to False for faster execution
 ALL_BUY_ORDERS_ARE_5_DOLLARS = False  # When True, every buy order is a $5.00 fractional share market day order
 FRACTIONAL_BUY_ORDERS = True  # Enable fractional share orders
+POINT_THRESHOLD = 50  # Threshold for buy/sell action
 
 # Global variables
 YOUR_SECRET_KEY = os.getenv("YOUR_SECRET_KEY")
@@ -201,7 +203,7 @@ def cleanup_invalid_positions():
 def client_get_quote(symbol, retries=3):
     for attempt in range(retries):
         try:
-            return get_cached_data(symbol, 'current_price_public', _fetch_current_price_public, symbol)
+            return get_cached_data(symbol, 'current_price_ccxt', _fetch_current_price_ccxt, symbol)
         except Exception as e:
             if attempt == retries - 1:
                 logging.error(f"All retries failed for {symbol}: {e}")
@@ -211,29 +213,19 @@ def client_get_quote(symbol, retries=3):
 
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
-def _fetch_current_price_public(symbol):
-    if not account_id:
-        raise ValueError("No account_id available")
-    url = f"{BASE_URL}/marketdata/{account_id}/quotes"
-    request_body = {
-        "instruments": [
-            {
-                "symbol": symbol,
-                "type": "CRYPTO"
-            }
-        ]
-    }
-    response = requests.post(url, headers=HEADERS, json=request_body, timeout=5)
-    response.raise_for_status()
-    data = response.json()
-    quotes = data.get("quotes", [])
-    if quotes and quotes[0].get("outcome") == "SUCCESS":
-        last = float(quotes[0].get("last", 0))
-        price_color = GREEN if last >= 0 else RED
-        print(f"Public.com last price for {symbol}: {price_color}${last:.4f}{RESET}")
-        return round(last, 4)
-    else:
-        raise ValueError("No successful quote from Public.com")
+def _fetch_current_price_ccxt(symbol):
+    exchange = ccxt.coinbase()
+    symbol_usd = f"{symbol}/USD"
+    try:
+        ticker = exchange.fetch_ticker(symbol_usd)
+        last_price = float(ticker.get('last', 0))
+        price_color = GREEN if last_price >= 0 else RED
+        print(f"Coinbase last price for {symbol}: {price_color}${last_price:.4f}{RESET}")
+        return round(last_price, 4)
+    except Exception as e:
+        logging.error(f"Error fetching price for {symbol} from Coinbase: {e}")
+        print(f"Error fetching price for {symbol} from Coinbase: {e}")
+        return None
 
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
@@ -619,63 +611,91 @@ def load_positions_from_database():
 def calculate_technical_indicators(symbol, lookback_days=200):
     print(f"Calculating technical indicators for {symbol} using ccxt...")
     logging.info(f"Calculating technical indicators for {symbol}")
-    exchange = ccxt.binance()
-    symbol_usdt = symbol + '/USDT'
-    data = exchange.fetch_ohlcv(symbol_usdt, timeframe='1d', limit=lookback_days)
-    historical_data = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    historical_data['timestamp'] = pd.to_datetime(historical_data['timestamp'], unit='ms')
-    historical_data.set_index('timestamp', inplace=True)
-    if historical_data.empty or len(historical_data) < lookback_days:
-        logging.error(f"Insufficient data for {symbol} (rows: {len(historical_data)})")
-        print(f"Insufficient data for {symbol} (rows: {len(historical_data)}).")
+    exchange = ccxt.coinbase()
+    symbol_usd = f"{symbol}/USD"
+    try:
+        data = exchange.fetch_ohlcv(symbol_usd, timeframe='1d', limit=lookback_days)
+        historical_data = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        historical_data['timestamp'] = pd.to_datetime(historical_data['timestamp'], unit='ms')
+        historical_data.set_index('timestamp', inplace=True)
+        if historical_data.empty or len(historical_data) < lookback_days:
+            logging.error(f"Insufficient data for {symbol} (rows: {len(historical_data)})")
+            print(f"Insufficient data for {symbol} (rows: {len(historical_data)}).")
+            return None
+        historical_data = historical_data.dropna(subset=['open', 'high', 'low', 'close'])
+        if len(historical_data) < 35:
+            logging.error(f"After cleaning, insufficient data for {symbol} (rows: {len(historical_data)})")
+            print(f"After cleaning, insufficient data for {symbol} (rows: {len(historical_data)}).")
+            return None
+        short_window = 12
+        long_window = 26
+        signal_window = 9
+        try:
+            macd, signal, _ = talib.MACD(historical_data['close'].values,
+                                         fastperiod=short_window,
+                                         slowperiod=long_window,
+                                         signalperiod=signal_window)
+            historical_data['macd'] = macd
+            historical_data['signal'] = signal
+        except Exception as e:
+            print(f"Error calculating MACD for {symbol}: {e}")
+            logging.error(f"Error calculating MACD for {symbol}: {e}")
+            historical_data['macd'] = np.nan
+            historical_data['signal'] = np.nan
+        try:
+            rsi = talib.RSI(historical_data['close'].values, timeperiod=14)
+            historical_data['rsi'] = rsi
+        except Exception as e:
+            print(f"Error calculating RSI for {symbol}: {e}")
+            logging.error(f"Error calculating RSI for {symbol}: {e}")
+            historical_data['rsi'] = np.nan
+        try:
+            upper, middle, lower = talib.BBANDS(historical_data['close'].values, timeperiod=20, nbdevup=2, nbdevdn=2)
+            historical_data['upper_bb'] = upper
+            historical_data['middle_bb'] = middle
+            historical_data['lower_bb'] = lower
+        except Exception as e:
+            print(f"Error calculating BB for {symbol}: {e}")
+            logging.error(f"Error calculating BB for {symbol}: {e}")
+            historical_data['upper_bb'] = np.nan
+            historical_data['middle_bb'] = np.nan
+            historical_data['lower_bb'] = np.nan
+        try:
+            historical_data['sma_200'] = talib.SMA(historical_data['close'].values, timeperiod=200)
+        except Exception as e:
+            print(f"Error calculating SMA for {symbol}: {e}")
+            logging.error(f"Error calculating SMA for {symbol}: {e}")
+            historical_data['sma_200'] = np.nan
+        try:
+            historical_data['typical_price'] = (historical_data['high'] + historical_data['low'] + historical_data['close']) / 3
+            historical_data['vwap'] = (historical_data['typical_price'] * historical_data['volume']).cumsum() / historical_data['volume'].cumsum()
+        except Exception as e:
+            print(f"Error calculating VWAP for {symbol}: {e}")
+            logging.error(f"Error calculating VWAP for {symbol}: {e}")
+            historical_data['vwap'] = np.nan
+        try:
+            historical_data['adx'] = talib.ADX(historical_data['high'].values, historical_data['low'].values, historical_data['close'].values, timeperiod=14)
+            historical_data['plus_di'] = talib.PLUS_DI(historical_data['high'].values, historical_data['low'].values, historical_data['close'].values, timeperiod=14)
+            historical_data['minus_di'] = talib.MINUS_DI(historical_data['high'].values, historical_data['low'].values, historical_data['close'].values, timeperiod=14)
+        except Exception as e:
+            print(f"Error calculating ADX for {symbol}: {e}")
+            logging.error(f"Error calculating ADX for {symbol}: {e}")
+            historical_data['adx'] = np.nan
+            historical_data['plus_di'] = np.nan
+            historical_data['minus_di'] = np.nan
+        historical_data['volume'] = historical_data['volume']
+        print(f"Technical indicators calculated for {symbol}.")
+        logging.info(f"Technical indicators calculated for {symbol}")
+        print_technical_indicators(symbol, historical_data)
+        return historical_data
+    except Exception as e:
+        logging.error(f"Error fetching OHLCV for {symbol}: {e}")
+        print(f"Error fetching OHLCV for {symbol}: {e}")
         return None
-    historical_data = historical_data.dropna(subset=['open', 'high', 'low', 'close'])
-    if len(historical_data) < 35:
-        logging.error(f"After cleaning, insufficient data for {symbol} (rows: {len(historical_data)})")
-        print(f"After cleaning, insufficient data for {symbol} (rows: {len(historical_data)}).")
-        return None
-    short_window = 12
-    long_window = 26
-    signal_window = 9
-    try:
-        macd, signal, _ = talib.MACD(historical_data['close'].values,
-                                     fastperiod=short_window,
-                                     slowperiod=long_window,
-                                     signalperiod=signal_window)
-        historical_data['macd'] = macd
-        historical_data['signal'] = signal
-    except Exception as e:
-        print(f"Error calculating MACD for {symbol}: {e}")
-        logging.error(f"Error calculating MACD for {symbol}: {e}")
-        historical_data['macd'] = np.nan
-        historical_data['signal'] = np.nan
-    try:
-        rsi = talib.RSI(historical_data['close'].values, timeperiod=14)
-        historical_data['rsi'] = rsi
-    except Exception as e:
-        print(f"Error calculating RSI for {symbol}: {e}")
-        logging.error(f"Error calculating RSI for {symbol}: {e}")
-        historical_data['rsi'] = np.nan
-    try:
-        upper, middle, lower = talib.BBANDS(historical_data['close'].values, timeperiod=20, nbdevup=2, nbdevdn=2)
-        historical_data['upper_bb'] = upper
-        historical_data['middle_bb'] = middle
-        historical_data['lower_bb'] = lower
-    except Exception as e:
-        print(f"Error calculating BB for {symbol}: {e}")
-        logging.error(f"Error calculating BB for {symbol}: {e}")
-        historical_data['upper_bb'] = np.nan
-        historical_data['middle_bb'] = np.nan
-        historical_data['lower_bb'] = np.nan
-    historical_data['volume'] = historical_data['volume']
-    print(f"Technical indicators calculated for {symbol}.")
-    logging.info(f"Technical indicators calculated for {symbol}")
-    print_technical_indicators(symbol, historical_data)
-    return historical_data
 
 def print_technical_indicators(symbol, historical_data):
     print(f"\nTechnical Indicators for {symbol}:\n")
-    tail_data = historical_data[['close', 'macd', 'signal', 'rsi', 'upper_bb', 'middle_bb', 'lower_bb', 'volume']].tail()
+    tail_data = historical_data[['close', 'macd', 'signal', 'rsi', 'upper_bb', 'middle_bb', 'lower_bb', 'sma_200', 'vwap', 'adx', 'plus_di', 'minus_di', 'volume']].tail()
     for idx, row in tail_data.iterrows():
         close_color = GREEN if row['close'] >= 0 else RED
         macd_value = row['macd']
@@ -696,9 +716,20 @@ def print_technical_indicators(symbol, historical_data):
         upper_display = f"{upper_bb:.4f}" if not np.isnan(upper_bb) else "N/A"
         middle_display = f"{middle_bb:.4f}" if not np.isnan(middle_bb) else "N/A"
         lower_display = f"{lower_bb:.4f}" if not np.isnan(lower_bb) else "N/A"
+        sma_200 = row['sma_200']
+        sma_display = f"{sma_200:.4f}" if not np.isnan(sma_200) else "N/A"
+        vwap = row['vwap']
+        vwap_display = f"{vwap:.4f}" if not np.isnan(vwap) else "N/A"
+        adx = row['adx']
+        plus_di = row['plus_di']
+        minus_di = row['minus_di']
+        adx_display = f"{adx:.2f}" if not np.isnan(adx) else "N/A"
+        plus_di_display = f"{plus_di:.2f}" if not np.isnan(plus_di) else "N/A"
+        minus_di_display = f"{minus_di:.2f}" if not np.isnan(minus_di) else "N/A"
         print(f"Time: {idx} | Close: {close_color}${row['close']:.2f}{RESET} | "
               f"MACD: {macd_color}{macd_display}{RESET} (Signal: {signal_display}) | "
-              f"RSI: {rsi_display} | Upper BB: {upper_display} | Middle BB: {middle_display} | Lower BB: {lower_display} | Volume: {row['volume']:.0f}")
+              f"RSI: {rsi_display} | Upper BB: {upper_display} | Middle BB: {middle_display} | Lower BB: {lower_display} | "
+              f"SMA200: {sma_display} | VWAP: {vwap_display} | ADX: {adx_display} | +DI: {plus_di_display} | -DI: {minus_di_display} | Volume: {row['volume']:.0f}")
     print("")
 
 @sleep_and_retry
@@ -706,15 +737,15 @@ def print_technical_indicators(symbol, historical_data):
 def get_daily_rsi(symbol):
     print(f"Calculating daily RSI for {symbol} using ccxt...")
     logging.info(f"Calculating daily RSI for {symbol}")
-    exchange = ccxt.binance()
-    symbol_usdt = symbol + '/USDT'
-    data = exchange.fetch_ohlcv(symbol_usdt, timeframe='1d', limit=30)
-    historical_data = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    if historical_data.empty or len(historical_data['close']) < 14:
-        print(f"Insufficient daily data for {symbol} (rows: {len(historical_data)}).")
-        logging.error(f"Insufficient daily data for {symbol} (rows: {len(historical_data)}).")
-        return 50.00
+    exchange = ccxt.coinbase()
+    symbol_usd = f"{symbol}/USD"
     try:
+        data = exchange.fetch_ohlcv(symbol_usd, timeframe='1d', limit=30)
+        historical_data = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        if historical_data.empty or len(historical_data['close']) < 14:
+            print(f"Insufficient daily data for {symbol} (rows: {len(historical_data)}).")
+            logging.error(f"Insufficient daily data for {symbol} (rows: {len(historical_data)}).")
+            return 50.00
         rsi = talib.RSI(historical_data['close'], timeperiod=14)[-1]
         rsi_value = round(rsi, 2) if not np.isnan(rsi) else 50.00
         print(f"Daily RSI for {symbol}: {rsi_value}")
@@ -731,11 +762,11 @@ def get_average_true_range(symbol):
     print(f"Calculating ATR for {symbol} using ccxt...")
     logging.info(f"Calculating ATR for {symbol}")
     def _fetch_atr(symbol):
-        exchange = ccxt.binance()
-        symbol_usdt = symbol + '/USDT'
-        data = exchange.fetch_ohlcv(symbol_usdt, timeframe='1d', limit=30)
-        df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        exchange = ccxt.coinbase()
+        symbol_usd = f"{symbol}/USD"
         try:
+            data = exchange.fetch_ohlcv(symbol_usd, timeframe='1d', limit=30)
+            df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             atr = talib.ATR(df['high'].values, df['low'].values, df['close'].values, timeperiod=22)
             atr_value = atr[-1]
             print(f"ATR value for {symbol}: {atr_value:.4f}")
@@ -749,96 +780,218 @@ def get_average_true_range(symbol):
 
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
-def is_in_uptrend(symbol):
-    print(f"Checking if {symbol} is in uptrend using ccxt...")
-    logging.info(f"Checking if {symbol} is in uptrend")
-    exchange = ccxt.binance()
-    symbol_usdt = symbol + '/USDT'
-    data = exchange.fetch_ohlcv(symbol_usdt, timeframe='1d', limit=200)
-    historical_data = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    if historical_data.empty or len(historical_data) < 200:
-        print(f"Insufficient data for {symbol}.")
-        logging.error(f"Insufficient data for {symbol}.")
-        return False
-    sma_200 = talib.SMA(historical_data['close'].values, timeperiod=200)[-1]
-    current_price = client_get_quote(symbol)
-    in_uptrend = current_price > sma_200 if current_price else False
-    sma_color = GREEN if sma_200 >= 0 else RED
-    price_color = GREEN if current_price >= 0 else RED
-    print(f"{symbol} {'is' if in_uptrend else 'is not'} in uptrend (Current: {price_color}${current_price:.2f}{RESET}, SMA200: {sma_color}${sma_200:.2f}{RESET}")
-    logging.info(f"{symbol} {'is' if in_uptrend else 'is not'} in uptrend (Current: ${current_price:.2f}, SMA200: ${sma_200:.2f})")
-    return in_uptrend
-
-@sleep_and_retry
-@limits(calls=CALLS, period=PERIOD)
-def get_last_price_within_past_5_minutes(symbols_to_buy_list):
-    print("Fetching last prices within past 5 minutes using ccxt...")
-    logging.info("Fetching last prices within past 5 minutes")
-    results = {}
-    exchange = ccxt.binance()
-    for symbol in symbols_to_buy_list:
-        print(f"Fetching 5-minute price data for {symbol}...")
-        try:
-            symbol_usdt = symbol + '/USDT'
-            data = exchange.fetch_ohlcv(symbol_usdt, timeframe='5m', limit=1)
-            if data:
-                last_price = round(float(data[-1][4]), 4)
-                price_color = GREEN if last_price >= 0 else RED
-                print(f"Last price for {symbol} within 5 minutes: {price_color}${last_price:.4f}{RESET}")
-                logging.info(f"Last price for {symbol} within 5 minutes: ${last_price:.4f}")
-                results[symbol] = last_price
-            else:
-                results[symbol] = None
-        except Exception as e:
-            logging.error(f"Error fetching 5-min data for {symbol}: {e}")
-            print(f"Error fetching 5-min data for {symbol}: {e}")
-            results[symbol] = None
-    return results
-
-@sleep_and_retry
-@limits(calls=CALLS, period=PERIOD)
-def get_last_price_within_past_5_days(symbols_to_buy_list):
-    print("Fetching last prices within past 5 days using ccxt...")
-    logging.info("Fetching last prices within past 5 days")
-    results = {}
-    exchange = ccxt.binance()
-    for symbol in symbols_to_buy_list:
-        print(f"Fetching 5-day price data for {symbol}...")
-        try:
-            symbol_usdt = symbol + '/USDT'
-            data = exchange.fetch_ohlcv(symbol_usdt, timeframe='1d', limit=5)
-            if data:
-                last_price = round(float(data[-1][4]), 2)
-                price_color = GREEN if last_price >= 0 else RED
-                print(f"Last price for {symbol} within 5 days: {price_color}${last_price:.2f}{RESET}")
-                logging.info(f"Last price for {symbol} within 5 days: ${last_price:.2f}")
-                results[symbol] = last_price
-            else:
-                results[symbol] = None
-        except Exception as e:
-            logging.error(f"Error fetching data for {symbol}: {e}")
-            print(f"Error fetching data for {symbol}: {e}")
-            results[symbol] = None
-    return results
-
-@sleep_and_retry
-@limits(calls=CALLS, period=PERIOD)
-def get_opening_price(symbol):
-    print(f"Fetching opening price for {symbol}...")
-    logging.info(f"Fetching opening price for {symbol}")
-    exchange = ccxt.binance()
-    symbol_usdt = symbol + '/USDT'
+def get_14_day_avg_range(symbol):
+    print(f"Calculating 14-day average price range for {symbol}...")
+    logging.info(f"Calculating 14-day average price range for {symbol}")
+    exchange = ccxt.coinbase()
+    symbol_usd = f"{symbol}/USD"
     try:
-        data = exchange.fetch_ohlcv(symbol_usdt, timeframe='1d', limit=1)
-        opening_price = round(float(data[0][1]), 4)
-        price_color = GREEN if opening_price >= 0 else RED
-        print(f"Opening price for {symbol}: {price_color}${opening_price:.4f}{RESET}")
-        logging.info(f"Opening price for {symbol}: ${opening_price:.4f}")
-        return opening_price
-    except IndexError:
-        logging.error(f"Opening price not found for {symbol}.")
-        print(f"Opening price not found for {symbol}.")
-        return None
+        data = exchange.fetch_ohlcv(symbol_usd, timeframe='1d', limit=14)
+        df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        avg_high = df['high'].mean()
+        avg_low = df['low'].mean()
+        print(f"14-day avg high for {symbol}: {avg_high:.4f}, avg low: {avg_low:.4f}")
+        logging.info(f"14-day avg high for {symbol}: {avg_high:.4f}, avg low: {avg_low:.4f}")
+        return avg_high, avg_low
+    except Exception as e:
+        logging.error(f"Error calculating 14-day avg range for {symbol}: {e}")
+        print(f"Error calculating 14-day avg range for {symbol}: {e}")
+        return None, None
+
+@sleep_and_retry
+@limits(calls=CALLS, period=PERIOD)
+def calculate_buy_points(symbol):
+    points = 0
+    current_price = client_get_quote(symbol)
+    if current_price is None:
+        return 0
+    avg_high, avg_low = get_14_day_avg_range(symbol)
+    if avg_low is not None and current_price <= avg_low:
+        return 100
+
+    historical_data = calculate_technical_indicators(symbol)
+    if historical_data is None:
+        return 0
+
+    # RSI (daily)
+    rsi = historical_data['rsi'].iloc[-1]
+    if not np.isnan(rsi) and rsi < 30:
+        points += 10
+
+    # Daily RSI
+    daily_rsi = get_daily_rsi(symbol)
+    if daily_rsi < 30:
+        points += 10
+
+    # MACD crossover
+    macd = historical_data['macd']
+    signal = historical_data['signal']
+    if len(macd) >= 2 and not np.isnan(macd.iloc[-1]) and not np.isnan(signal.iloc[-1]) and not np.isnan(macd.iloc[-2]) and not np.isnan(signal.iloc[-2]):
+        if macd.iloc[-1] > signal.iloc[-1] and macd.iloc[-2] < signal.iloc[-2]:
+            points += 10
+
+    # Volume
+    volume = historical_data['volume']
+    if volume.iloc[-1] > volume.mean():
+        points += 10
+
+    # Bollinger Bands
+    lower_bb = historical_data['lower_bb'].iloc[-1]
+    if not np.isnan(lower_bb) and current_price < lower_bb:
+        points += 10
+
+    # ATR low
+    atr_low = get_atr_low_price(symbol)
+    if atr_low is not None and current_price < atr_low:
+        points += 10
+
+    # VWAP
+    vwap = historical_data['vwap'].iloc[-1]
+    if not np.isnan(vwap) and current_price > vwap:
+        points += 10
+
+    # SMA
+    sma_200 = historical_data['sma_200'].iloc[-1]
+    if not np.isnan(sma_200) and current_price > sma_200:
+        points += 10
+
+    # Trending momentum (ADX)
+    adx = historical_data['adx'].iloc[-1]
+    plus_di = historical_data['plus_di'].iloc[-1]
+    minus_di = historical_data['minus_di'].iloc[-1]
+    if not np.isnan(adx) and adx > 25 and not np.isnan(plus_di) and not np.isnan(minus_di) and plus_di > minus_di:
+        points += 10
+
+    # Bullish candlestick patterns
+    points += get_candlestick_points(symbol, 'buy')
+
+    print(f"Buy points for {symbol}: {points}")
+    logging.info(f"Buy points for {symbol}: {points}")
+    return points
+
+@sleep_and_retry
+@limits(calls=CALLS, period=PERIOD)
+def calculate_sell_points(symbol):
+    points = 0
+    current_price = client_get_quote(symbol)
+    if current_price is None:
+        return 0
+    avg_high, avg_low = get_14_day_avg_range(symbol)
+    if avg_high is not None and current_price >= avg_high:
+        return 100
+
+    historical_data = calculate_technical_indicators(symbol)
+    if historical_data is None:
+        return 0
+
+    # RSI (daily)
+    rsi = historical_data['rsi'].iloc[-1]
+    if not np.isnan(rsi) and rsi > 70:
+        points += 10
+
+    # Daily RSI
+    daily_rsi = get_daily_rsi(symbol)
+    if daily_rsi > 70:
+        points += 10
+
+    # MACD crossover
+    macd = historical_data['macd']
+    signal = historical_data['signal']
+    if len(macd) >= 2 and not np.isnan(macd.iloc[-1]) and not np.isnan(signal.iloc[-1]) and not np.isnan(macd.iloc[-2]) and not np.isnan(signal.iloc[-2]):
+        if macd.iloc[-1] < signal.iloc[-1] and macd.iloc[-2] > signal.iloc[-2]:
+            points += 10
+
+    # Volume
+    volume = historical_data['volume']
+    if volume.iloc[-1] > volume.mean():
+        points += 10
+
+    # Bollinger Bands
+    upper_bb = historical_data['upper_bb'].iloc[-1]
+    if not np.isnan(upper_bb) and current_price > upper_bb:
+        points += 10
+
+    # ATR high
+    atr_high = get_atr_high_price(symbol)
+    if atr_high is not None and current_price > atr_high:
+        points += 10
+
+    # VWAP
+    vwap = historical_data['vwap'].iloc[-1]
+    if not np.isnan(vwap) and current_price < vwap:
+        points += 10
+
+    # SMA
+    sma_200 = historical_data['sma_200'].iloc[-1]
+    if not np.isnan(sma_200) and current_price < sma_200:
+        points += 10
+
+    # Trending momentum (ADX)
+    adx = historical_data['adx'].iloc[-1]
+    plus_di = historical_data['plus_di'].iloc[-1]
+    minus_di = historical_data['minus_di'].iloc[-1]
+    if not np.isnan(adx) and adx > 25 and not np.isnan(plus_di) and not np.isnan(minus_di) and plus_di < minus_di:
+        points += 10
+
+    # Bearish candlestick patterns
+    points += get_candlestick_points(symbol, 'sell')
+
+    print(f"Sell points for {symbol}: {points}")
+    logging.info(f"Sell points for {symbol}: {points}")
+    return points
+
+def get_candlestick_points(symbol, side):
+    exchange = ccxt.coinbase()
+    symbol_usd = f"{symbol}/USD"
+    try:
+        data = exchange.fetch_ohlcv(symbol_usd, timeframe='5m', limit=20)
+        df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        if df.empty or len(df) < 3:
+            return 0
+        df = df.dropna(subset=['open', 'high', 'low', 'close'])
+        if len(df) < 3:
+            return 0
+        open_ = df['open'].values
+        high = df['high'].values
+        low = df['low'].values
+        close = df['close'].values
+        lookback_candles = min(20, len(close))
+        detected = False
+        if side == 'buy':
+            patterns = {
+                'Hammer': talib.CDLHAMMER,
+                'Bullish Engulfing': talib.CDLENGULFING,
+                'Morning Star': talib.CDLMORNINGSTAR,
+                'Piercing Line': talib.CDLPIERCING,
+                'Three White Soldiers': talib.CDL3WHITESOLDIERS,
+                'Dragonfly Doji': talib.CDLDRAGONFLYDOJI,
+                'Inverted Hammer': talib.CDLINVERTEDHAMMER,
+                'Tweezer Bottom': talib.CDLMATCHINGLOW
+            }
+            for name, func in patterns.items():
+                res = func(open_, high, low, close)
+                if res[-1] > 0:
+                    detected = True
+                    break
+        elif side == 'sell':
+            patterns = {
+                'Bearish Engulfing': talib.CDLENGULFING,
+                'Evening Star': talib.CDLEVENINGSTAR,
+                'Dark Cloud Cover': talib.CDLDARKCLOUDCOVER,
+                'Shooting Star': talib.CDLSHOOTINGSTAR,
+                'Hanging Man': talib.CDLHANGINGMAN
+            }
+            for name, func in patterns.items():
+                res = func(open_, high, low, close)
+                if res[-1] < 0:
+                    detected = True
+                    break
+        return 10 if detected else 0
+    except Exception as e:
+        logging.error(f"Error in candlestick detection for {symbol}: {e}")
+        return 0
 
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
@@ -892,6 +1045,10 @@ def track_price_changes(symbol):
         print(f"{symbol} price has not changed | current price: {current_color}${current_price:.2f}{RESET}")
         logging.info(f"{symbol} price has not changed | current price: ${current_price:.2f}")
     update_previous_price(symbol, current_price)
+
+def check_price_moves():
+    for sym in symbols_to_buy:
+        track_price_changes(sym)
 
 def print_database_tables():
     if PRINT_DATABASE:
@@ -977,9 +1134,14 @@ def rate_limited_get_quote(sym):
 @sleep_and_retry
 @limits(calls=YF_CALLS_PER_MINUTE, period=ONE_MINUTE)
 def rate_limited_fetch_ohlcv(sym, timeframe, limit):
-    exchange = ccxt.binance()
-    symbol_usdt = sym + '/USDT'
-    return exchange.fetch_ohlcv(symbol_usdt, timeframe=timeframe, limit=limit)
+    exchange = ccxt.coinbase()
+    symbol_usd = f"{sym}/USD"
+    try:
+        return exchange.fetch_ohlcv(symbol_usd, timeframe=timeframe, limit=limit)
+    except Exception as e:
+        logging.error(f"Error fetching OHLCV for {sym}: {e}")
+        print(f"Error fetching OHLCV for {sym}: {e}")
+        return []
 
 def buy_cryptos(symbols_to_sell_dict, symbols_to_buy_list):
     if task_running['buy_cryptos']:
@@ -1037,30 +1199,17 @@ def buy_cryptos(symbols_to_sell_dict, symbols_to_buy_list):
             logging.info("No valid symbols to buy after filtering.")
             return
         
-        # Find buy signals
+        # Find buy signals based on points
         buy_signal_symbols = []
         for sym in valid_symbols:
-            print(f"\n{'='*60}")
-            print(f"Evaluating {sym} for buy signal...")
-            print(f"{'='*60}")
-            logging.info(f"Evaluating {sym} for buy signal")
-            current_price = rate_limited_get_quote(sym)
-            if current_price is None:
-                print(f"No valid price data for {sym}. Skipping.")
-                logging.info(f"No valid price data for {sym}")
-                continue
-            historical_data = calculate_technical_indicators(sym)
-            if historical_data is None:
-                continue
-            lower_bb = historical_data['lower_bb'].iloc[-1]
-            atr_low = get_atr_low_price(sym)
-            if not np.isnan(lower_bb) and atr_low is not None and current_price <= lower_bb and current_price <= atr_low:
+            points = calculate_buy_points(sym)
+            if points >= POINT_THRESHOLD:
                 buy_signal_symbols.append(sym)
-                print(f"{sym}: Buy signal detected (Price <= Lower BB ({lower_bb:.4f}) and <= ATR Low ({atr_low:.4f}))")
-                logging.info(f"{sym}: Buy signal detected (Price <= Lower BB ({lower_bb:.4f}) and <= ATR Low ({atr_low:.4f}))")
+                print(f"{sym}: Buy signal detected (Points: {points})")
+                logging.info(f"{sym}: Buy signal detected (Points: {points})")
             else:
-                print(f"{sym}: No buy signal (Price: {current_price:.4f}, Lower BB: {lower_bb:.4f}, ATR Low: {atr_low:.4f if atr_low else 'N/A'})")
-                logging.info(f"{sym}: No buy signal (Price: {current_price:.4f}, Lower BB: {lower_bb:.4f}, ATR Low: {atr_low:.4f if atr_low else 'N/A'})")
+                print(f"{sym}: No buy signal (Points: {points})")
+                logging.info(f"{sym}: No buy signal (Points: {points})")
         
         # Determine dollar allocation based on buying power
         remaining_symbols = buy_signal_symbols
@@ -1121,26 +1270,26 @@ def buy_cryptos(symbols_to_sell_dict, symbols_to_buy_list):
                     status_info = poll_order_status(order_id)
                     if status_info and status_info["status"] == "FILLED":
                         filled_qty = status_info["filled_qty"]
-                        avg_price = status_info["avg_price"] or current_price
+                        filled_price = status_info["avg_price"] or current_price
                         trade = TradeHistory(
                             symbols=sym,
                             action='buy',
                             quantity=filled_qty,
-                            price=avg_price,
+                            price=filled_price,
                             date=today_date_str
                         )
                         session.add(trade)
                         position = session.query(Position).filter_by(symbols=sym).first()
                         if position:
                             total_qty = position.quantity + filled_qty
-                            total_cost = (position.quantity * position.avg_price) + (filled_qty * avg_price)
-                            position.avg_price = total_cost / total_qty if total_qty else avg_price
+                            total_cost = (position.quantity * position.avg_price) + (filled_qty * filled_price)
+                            position.avg_price = total_cost / total_qty if total_qty else filled_price
                             position.quantity = total_qty
                         else:
                             position = Position(
                                 symbols=sym,
                                 quantity=filled_qty,
-                                avg_price=avg_price,
+                                avg_price=filled_price,
                                 purchase_date=today_date_str
                             )
                             session.add(position)
@@ -1154,10 +1303,10 @@ def buy_cryptos(symbols_to_sell_dict, symbols_to_buy_list):
                                 'Sell': ' ',
                                 'Quantity': filled_qty,
                                 'Symbol': sym,
-                                'Price Per Share': avg_price
+                                'Price Per Share': filled_price
                             })
                         send_alert(
-                            f"Bought {filled_qty:.4f} of {sym} at ${avg_price:.2f}",
+                            f"Bought {filled_qty:.4f} of {sym} at ${filled_price:.2f}",
                             subject=f"Trade Executed: Bought {sym}"
                         )
                         acc = client_get_account()
@@ -1206,11 +1355,7 @@ def sell_cryptos():
                     print(f"No valid price data for {sym}. Skipping.")
                     logging.info(f"No valid price data for {sym}. Skipping")
                     continue
-                historical_data = calculate_technical_indicators(sym)
-                if historical_data is None:
-                    continue
-                upper_bb = historical_data['upper_bb'].iloc[-1]
-                # Check for minimum 0.5% profit
+                points = calculate_sell_points(sym)
                 profit_pct = ((current_price - pos.avg_price) / pos.avg_price * 100) if pos.avg_price > 0 else 0
                 profit_color = GREEN if profit_pct >= 0 else RED
                 print(f"{sym}: Current price: {profit_color}${current_price:.2f}{RESET}, Avg price: ${pos.avg_price:.2f}, Profit: {profit_color}{profit_pct:.2f}%{RESET}")
@@ -1219,9 +1364,9 @@ def sell_cryptos():
                     print(f"Skipping sell for {sym}: Profit ({profit_pct:.2f}%) is less than 0.5%.")
                     logging.info(f"Skipping sell for {sym}: Profit ({profit_pct:.2f}%) is less than 0.5%")
                     continue
-                if not np.isnan(upper_bb) and current_price >= upper_bb:
-                    print(f"{sym}: Sell signal detected (Price >= Upper BB ({upper_bb:.4f}))")
-                    logging.info(f"{sym}: Sell signal detected (Price >= Upper BB ({upper_bb:.4f}))")
+                if points >= POINT_THRESHOLD:
+                    print(f"{sym}: Sell signal detected (Points: {points})")
+                    logging.info(f"{sym}: Sell signal detected (Points: {points})")
                     if not ensure_no_open_orders(sym):
                         print(f"Cannot sell {sym}: Open orders exist.")
                         logging.info(f"Cannot sell {sym}: Open orders exist")
@@ -1272,7 +1417,7 @@ def sell_cryptos():
                                         })
                                     send_alert(
                                         f"Sold {filled_qty:.5f} of {sym} at ${filled_price:.2f}",
-                                        subject=f"Sell Order: {sym}"
+                                        subject=f"Sell Executed: {sym}"
                                     )
                                     print(f"Sell Order for {filled_qty:.5f} of {sym} at ${filled_price:.2f}")
                                     logging.info(f"Sell Order for {filled_qty:.5f} of {sym} at ${filled_price:.2f}")
@@ -1335,8 +1480,8 @@ def sell_cryptos():
                                 print(f"All retries failed for {sym}.")
                                 logging.error(f"All retries failed for {sym}")
                 else:
-                    print(f"{sym}: No sell signal (Price: {current_price:.4f}, Upper BB: {upper_bb:.4f})")
-                    logging.info(f"{sym}: No sell signal (Price: {current_price:.4f}, Upper BB: {upper_bb:.4f})")
+                    print(f"{sym}: No sell signal (Points: {points})")
+                    logging.info(f"{sym}: No sell signal (Points: {points})")
         except Exception as e:
             session.rollback()
             logging.error(f"Error in sell_cryptos: {e}")
