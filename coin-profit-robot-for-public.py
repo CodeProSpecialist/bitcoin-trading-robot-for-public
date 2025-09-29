@@ -51,30 +51,10 @@ last_token_fetch_time = None
 BASE_URL = "https://api.public.com/userapigateway"
 HEADERS = None
 symbols_to_buy = [
-    "BTC", "ETH", "SOL", "XRP", "LINK", "LTC", "AVAX", "DOT", "UNI", "FIL",
-    "ADA", "MATIC", "ATOM", "NEAR", "ICP", "AAVE", "ALGO", "ETC", "XLM", "OP"
+    "BTC"
 ]
 risk_levels = {
-    "BTC": "ultra-low",
-    "ETH": "ultra-low",
-    "SOL": "medium",
-    "XRP": "medium-low",
-    "LINK": "medium-low",
-    "LTC": "medium-low",
-    "AVAX": "medium",
-    "DOT": "medium",
-    "UNI": "medium",
-    "FIL": "medium",
-    "ADA": "medium",
-    "MATIC": "medium-low",
-    "ATOM": "medium",
-    "NEAR": "medium",
-    "ICP": "medium-high",
-    "AAVE": "medium",
-    "ALGO": "medium-high",
-    "ETC": "medium-high",
-    "XLM": "medium",
-    "OP": "medium"
+    "BTC": "ultra-low"
 }
 allocation_per_risk = {
     "ultra-low": 10.0,
