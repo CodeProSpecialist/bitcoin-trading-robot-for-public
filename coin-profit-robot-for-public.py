@@ -32,9 +32,8 @@ CYAN = "\033[96m"
 RESET = "\033[0m"
 
 # Configuration flags
-PRINT_SYMBOLS_TO_BUY = False  # Set to False for faster execution
 PRINT_ROBOT_STORED_BUY_AND_SELL_LIST_DATABASE = True  # Set to True to view database
-PRINT_DATABASE = True  # Set to True to view cryptos to sell
+PRINT_DATABASE = True  # Set to True to view positions to sell
 DEBUG = False  # Set to False for faster execution
 ALL_BUY_ORDERS_ARE_5_DOLLARS = False  # When True, every buy order is a $5.00 fractional share market day order
 FRACTIONAL_BUY_ORDERS = True  # Enable fractional share orders
@@ -50,29 +49,23 @@ account_id = None
 last_token_fetch_time = None
 BASE_URL = "https://api.public.com/userapigateway"
 HEADERS = None
-symbols_to_buy = [
-    "BTC"
-]
 risk_levels = {
     "BTC": "ultra-low"
 }
 allocation_per_risk = {
-    "ultra-low": 10.0,
-    "medium-low": 5.0,
-    "medium": 3.0,
-    "medium-high": 1.0
+    "ultra-low": 10.0
 }
 symbols_to_sell_dict = {}
 today_date = datetime.today().date()
 today_datetime = datetime.now(pytz.timezone('US/Eastern'))
-csv_filename = 'log-file-of-buy-and-sell-signals.csv'
+csv_filename = 'log-file-of-buy-and-sell-signals-btc.csv'
 fieldnames = ['Date', 'Buy', 'Sell', 'Quantity', 'Symbol', 'Price Per Share']
 price_changes = {}
 current_price = 0
 today_date_str = today_date.strftime("%Y-%m-%d")
 qty = 0
-price_history = {}  # symbols -> interval -> list of prices
-last_stored = {}  # symbols -> interval -> last_timestamp
+price_history = {}  # BTC -> interval -> list of prices
+last_stored = {}  # BTC -> interval -> last_timestamp
 interval_map = {
     '1min': 60,
     '5min': 300,
@@ -105,7 +98,7 @@ db_lock = threading.Lock()
 eastern = pytz.timezone('US/Eastern')
 
 # Logging configuration
-logging.basicConfig(filename='trading-bot-program-logging-messages.txt', level=logging.INFO, 
+logging.basicConfig(filename='trading-bot-program-logging-messages-btc.txt', level=logging.INFO, 
                     format='%(asctime)s %(levelname)s:%(message)s')
 
 # Initialize CSV file
@@ -137,7 +130,7 @@ class Position(Base):
 
 # Initialize SQLAlchemy
 def initialize_database():
-    engine = create_engine('sqlite:///trading_bot.db', connect_args={"check_same_thread": False})
+    engine = create_engine('sqlite:///trading_bot_btc.db', connect_args={"check_same_thread": False})
     with engine.connect() as conn:
         conn.execute(text("PRAGMA journal_mode=WAL;"))
     SessionLocal = scoped_session(sessionmaker(bind=engine))
@@ -262,7 +255,7 @@ def client_place_order(symbol, side, amount=None, quantity=None, order_type="MAR
                 amount=amount,
                 quantity=quantity
             )
-        else:  # STOP - Note: Stop orders may not be supported for crypto on Public.com; comment out if not available
+        else:  # STOP - Note: Stop orders may not be supported for crypto on Public.com
             logging.warning(f"Stop orders may not be supported for crypto. Skipping for {symbol}.")
             return None
         if order_response.get('error'):
@@ -496,6 +489,8 @@ def client_list_positions():
         out = []
         for p in pos_list:
             sym = p.get('instrument', {}).get('symbol')
+            if sym != 'BTC':
+                continue  # Only process BTC
             qty = float(p.get('quantity', 0))
             avg = round(float(p.get('costBasis', {}).get('unitCost', 0)), 2)
             opened_at = p.get('openedAt', datetime.now(eastern).strftime("%Y-%m-%d"))
@@ -535,6 +530,8 @@ def sync_db_with_api():
             positions_to_delete = []
             for pos in api_positions:
                 symbol = pos['symbol']
+                if symbol != 'BTC':
+                    continue  # Only sync BTC
                 qty = pos['qty']
                 avg_price = pos['avg_entry_price']
                 purchase_date = pos['purchase_date']
@@ -559,7 +556,7 @@ def sync_db_with_api():
                     client_cancel_order({'orderId': db_pos.stop_order_id, 'instrument': {'symbol': db_pos.symbols}})
                 session.delete(db_pos)
             session.commit()
-            print("Database synced with API.")
+            print("Database synced with API for BTC.")
         except Exception as e:
             session.rollback()
             logging.error(f"Error syncing DB with API: {e}")
@@ -569,18 +566,18 @@ def sync_db_with_api():
         task_running['sync_db_with_api'] = False
 
 def load_positions_from_database():
-    print("Loading positions from database...")
+    print("Loading BTC position from database...")
     with db_lock:
         session = SessionLocal()
         try:
-            positions = session.query(Position).all()
+            positions = session.query(Position).filter(Position.symbols == 'BTC').all()
             symbols_to_sell_dict = {}
             for position in positions:
                 symbols_to_sell = position.symbols
                 avg_price = position.avg_price
                 purchase_date = position.purchase_date
                 symbols_to_sell_dict[symbols_to_sell] = (avg_price, purchase_date)
-            print(f"Loaded {len(symbols_to_sell_dict)} positions from database.")
+            print(f"Loaded {len(symbols_to_sell_dict)} BTC position from database.")
             return symbols_to_sell_dict
         finally:
             session.close()
@@ -1026,8 +1023,7 @@ def track_price_changes(symbol):
     update_previous_price(symbol, current_price)
 
 def check_price_moves():
-    for sym in symbols_to_buy:
-        track_price_changes(sym)
+    track_price_changes('BTC')
 
 def print_database_tables():
     if PRINT_DATABASE:
@@ -1035,11 +1031,11 @@ def print_database_tables():
         try:
             print("\nTrade History In This Robot's Database:")
             print("\nCrypto | Buy or Sell | Quantity | Avg. Price | Date")
-            for record in session.query(TradeHistory).all():
+            for record in session.query(TradeHistory).filter(TradeHistory.symbols == 'BTC').all():
                 print(f"{record.symbols} | {record.action} | {record.quantity:.4f} | ${record.price:.2f} | {record.date}")
-            print("\nPositions in the Database To Sell:")
+            print("\nBTC Position in the Database To Sell:")
             print("\nCrypto | Quantity | Avg. Price | Date | Current Price | % Change")
-            for record in session.query(Position).all():
+            for record in session.query(Position).filter(Position.symbols == 'BTC').all():
                 current_price = client_get_quote(record.symbols)
                 percentage_change = ((current_price - record.avg_price) / record.avg_price * 100) if current_price and record.avg_price else 0
                 color = GREEN if percentage_change >= 0 else RED
@@ -1052,15 +1048,9 @@ def print_database_tables():
             session.close()
 
 def get_symbols_to_buy():
-    print("Loading symbols to buy...")
-    logging.info("Loading symbols to buy")
-    print(f"Loaded {len(symbols_to_buy)} symbols: {symbols_to_buy}")
-    logging.info(f"Loaded {len(symbols_to_buy)} symbols: {symbols_to_buy}")
-    return symbols_to_buy
-
-# Note: Stop-loss orders may not be supported for crypto on Public.com. This function is disabled.
-# def place_stop_loss_order(...):
-#     return None, None
+    print("Setting BTC as the only symbol to analyze...")
+    logging.info("Setting BTC as the only symbol to analyze")
+    return ['BTC']
 
 def monitor_stop_losses():
     # Disabled for crypto
@@ -1122,7 +1112,7 @@ def rate_limited_fetch_ohlcv(sym, timeframe, limit):
         print(f"Error fetching OHLCV for {sym}: {e}")
         return []
 
-def buy_cryptos(symbols_to_sell_dict, symbols_to_buy_list):
+def buy_cryptos(symbols_to_sell_dict):
     if task_running['buy_cryptos']:
         print("buy_cryptos already running. Skipping.")
         logging.info("buy_cryptos already running. Skipping")
@@ -1132,10 +1122,7 @@ def buy_cryptos(symbols_to_sell_dict, symbols_to_buy_list):
         print("Starting buy_cryptos function...")
         logging.info("Starting buy_cryptos function")
         global price_history, last_stored
-        if not symbols_to_buy_list:
-            print("No symbols to buy.")
-            logging.info("No symbols to buy.")
-            return
+        sym = 'BTC'
         acc = client_get_account()
         total_equity = acc['equity']
         buying_power = float(acc['buying_power_cash'])
@@ -1155,149 +1142,120 @@ def buy_cryptos(symbols_to_sell_dict, symbols_to_buy_list):
             print("Portfolio exposure limit reached. No new buys.")
             logging.info("Portfolio exposure limit reached.")
             return
-        valid_symbols = []
-        print("Filtering valid symbols for buying...")
-        logging.info("Filtering valid symbols for buying")
-        for sym in symbols_to_buy_list:
-            current_price = rate_limited_get_quote(sym)
-            if current_price is None:
-                print(f"No valid price data for {sym}. Skipping.")
-                logging.info(f"No valid price data for {sym}. Skipping")
-                continue
-            data = rate_limited_fetch_ohlcv(sym, '1d', 200)
-            df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            if df.empty or len(df) < 20:  # At least for BB timeperiod=20
-                print(f"Insufficient historical data for {sym} (daily rows: {len(df)}). Skipping.")
-                logging.info(f"Insufficient historical data for {sym} (daily rows: {len(df)}). Skipping")
-                continue
-            valid_symbols.append(sym)
-        print(f"Valid symbols to process: {valid_symbols}")
-        logging.info(f"Valid symbols to process: {valid_symbols}")
-        if not valid_symbols:
-            print("No valid symbols to buy after filtering.")
-            logging.info("No valid symbols to buy after filtering.")
+        current_price = rate_limited_get_quote(sym)
+        if current_price is None:
+            print(f"No valid price data for {sym}. Skipping.")
+            logging.info(f"No valid price data for {sym}. Skipping")
             return
-        
-        # Find buy signals based on points
-        buy_signal_symbols = []
-        for sym in valid_symbols:
-            points = calculate_buy_points(sym)
-            if points >= POINT_THRESHOLD:
-                buy_signal_symbols.append(sym)
-                print(f"{sym}: Buy signal detected (Points: {points})")
-                logging.info(f"{sym}: Buy signal detected (Points: {points})")
-            else:
-                print(f"{sym}: No buy signal (Points: {points})")
-                logging.info(f"{sym}: No buy signal (Points: {points})")
-        
-        # Determine dollar allocation based on buying power
-        remaining_symbols = buy_signal_symbols
-        if not remaining_symbols:
-            print("No buy signals detected.")
-            logging.info("No buy signals detected.")
+        data = rate_limited_fetch_ohlcv(sym, '1d', 200)
+        df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        if df.empty or len(df) < 20:  # At least for BB timeperiod=20
+            print(f"Insufficient historical data for {sym} (daily rows: {len(df)}). Skipping.")
+            logging.info(f"Insufficient historical data for {sym} (daily rows: {len(df)}). Skipping")
             return
-        
-        # Execute buy orders for symbols with buy signals
+        points = calculate_buy_points(sym)
+        if points >= POINT_THRESHOLD:
+            print(f"{sym}: Buy signal detected (Points: {points})")
+            logging.info(f"{sym}: Buy signal detected (Points: {points})")
+        else:
+            print(f"{sym}: No buy signal (Points: {points})")
+            logging.info(f"{sym}: No buy signal (Points: {points})")
+            return
         session = SessionLocal()
         try:
-            for sym in remaining_symbols:
-                print(f"\n{'='*60}")
-                print(f"Processing buy for {sym}...")
-                print(f"{'='*60}")
-                logging.info(f"Processing buy for {sym}")
-                today_date = datetime.today().date()
-                today_date_str = today_date.strftime("%Y-%m-%d")
-                current_datetime = datetime.now(eastern)
-                current_time_str = current_datetime.strftime("Eastern Time | %I:%M:%S %p | %m-%d-%Y |")
-                print(f"Analysis time: {current_time_str}")
-                logging.info(f"Analysis time: {current_time_str}")
-                current_price = rate_limited_get_quote(sym)
-                if current_price is None:
-                    print(f"No valid price data for {sym}.")
-                    logging.info(f"No valid price data for {sym}")
-                    continue
-                if not ensure_no_open_orders(sym):
-                    print(f"Cannot buy {sym}: Open orders still exist after cancellation attempt.")
-                    logging.info(f"Cannot buy {sym}: Open orders still exist after cancellation attempt.")
-                    continue
-                acc = client_get_account()
-                buying_power = float(acc['buying_power_cash'])
-                print(f"Current buying power before buying {sym}: ${buying_power:.2f}")
-                logging.info(f"Current buying power before buying {sym}: ${buying_power:.2f}")
-                if buying_power < 10.00:
-                    print(f"Buying power < $10.00. Stopping buy orders.")
-                    logging.info(f"Buying power < $10.00. Stopping buy orders.")
-                    break
-                dollar_amount = allocation_per_risk.get(risk_levels.get(sym, "medium"), 3.0)
-                if dollar_amount > buying_power - 5.00:
-                    dollar_amount = max(buying_power - 5.00, 0.0)
-                if dollar_amount < 1.00:
-                    print(f"Insufficient buying power for {sym}. Stopping.")
-                    logging.info(f"Insufficient buying power for {sym}. Stopping.")
-                    break
-                qty = dollar_amount / current_price if current_price else 0
-                if qty <= 0:
-                    print(f"Invalid quantity for {sym}. Skipping.")
-                    logging.info(f"Invalid quantity for {sym}. Skipping.")
-                    continue
-                print(f"Attempting to buy ${dollar_amount:.2f} ({qty:.4f} of {sym})...")
-                logging.info(f"Attempting to buy ${dollar_amount:.2f} ({qty:.4f} of {sym})")
-                order_id = client_place_order(sym, "BUY", amount=dollar_amount)
-                if order_id:
-                    print(f"Buy order placed for ${dollar_amount:.2f} of {sym}, Order ID: {order_id}")
-                    logging.info(f"Buy order placed for ${dollar_amount:.2f} of {sym}, Order ID: {order_id}")
-                    status_info = poll_order_status(order_id)
-                    if status_info and status_info["status"] == "FILLED":
-                        filled_qty = status_info["filled_qty"]
-                        filled_price = status_info["avg_price"] or current_price
-                        trade = TradeHistory(
-                            symbols=sym,
-                            action='buy',
-                            quantity=filled_qty,
-                            price=filled_price,
-                            date=today_date_str
-                        )
-                        session.add(trade)
-                        position = session.query(Position).filter_by(symbols=sym).first()
-                        if position:
-                            total_qty = position.quantity + filled_qty
-                            total_cost = (position.quantity * position.avg_price) + (filled_qty * filled_price)
-                            position.avg_price = total_cost / total_qty if total_qty else filled_price
-                            position.quantity = total_qty
-                        else:
-                            position = Position(
-                                symbols=sym,
-                                quantity=filled_qty,
-                                avg_price=filled_price,
-                                purchase_date=today_date_str
-                            )
-                            session.add(position)
-                        # Stop-loss disabled for crypto
-                        session.commit()
-                        with open(csv_filename, mode='a', newline='') as csv_file:
-                            csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
-                            csv_writer.writerow({
-                                'Date': today_date_str,
-                                'Buy': 'Buy',
-                                'Sell': ' ',
-                                'Quantity': filled_qty,
-                                'Symbol': sym,
-                                'Price Per Share': filled_price
-                            })
-                        send_alert(
-                            f"Bought {filled_qty:.4f} of {sym} at ${filled_price:.2f}",
-                            subject=f"Trade Executed: Bought {sym}"
-                        )
-                        acc = client_get_account()
-                        buying_power = float(acc['buying_power_cash'])
-                        print(f"Updated buying power after buying {sym}: ${buying_power:.2f}")
-                        logging.info(f"Updated buying power after buying {sym}: ${buying_power:.2f}")
+            print(f"\n{'='*60}")
+            print(f"Processing buy for {sym}...")
+            print(f"{'='*60}")
+            logging.info(f"Processing buy for {sym}")
+            today_date = datetime.today().date()
+            today_date_str = today_date.strftime("%Y-%m-%d")
+            current_datetime = datetime.now(eastern)
+            current_time_str = current_datetime.strftime("Eastern Time | %I:%M:%S %p | %m-%d-%Y |")
+            print(f"Analysis time: {current_time_str}")
+            logging.info(f"Analysis time: {current_time_str}")
+            if not ensure_no_open_orders(sym):
+                print(f"Cannot buy {sym}: Open orders still exist after cancellation attempt.")
+                logging.info(f"Cannot buy {sym}: Open orders still exist after cancellation attempt.")
+                return
+            acc = client_get_account()
+            buying_power = float(acc['buying_power_cash'])
+            print(f"Current buying power before buying {sym}: ${buying_power:.2f}")
+            logging.info(f"Current buying power before buying {sym}: ${buying_power:.2f}")
+            if buying_power < 10.00:
+                print(f"Buying power < $10.00. Stopping buy orders.")
+                logging.info(f"Buying power < $10.00. Stopping buy orders.")
+                return
+            dollar_amount = allocation_per_risk.get(risk_levels.get(sym, "ultra-low"), 10.0)
+            if ALL_BUY_ORDERS_ARE_5_DOLLARS:
+                dollar_amount = 5.00
+            if dollar_amount > buying_power - 5.00:
+                dollar_amount = max(buying_power - 5.00, 0.0)
+            if dollar_amount < 1.00:
+                print(f"Insufficient buying power for {sym}. Stopping.")
+                logging.info(f"Insufficient buying power for {sym}. Stopping.")
+                return
+            qty = dollar_amount / current_price if current_price else 0
+            if qty <= 0:
+                print(f"Invalid quantity for {sym}. Skipping.")
+                logging.info(f"Invalid quantity for {sym}. Skipping.")
+                return
+            print(f"Attempting to buy ${dollar_amount:.2f} ({qty:.4f} of {sym})...")
+            logging.info(f"Attempting to buy ${dollar_amount:.2f} ({qty:.4f} of {sym})")
+            order_id = client_place_order(sym, "BUY", amount=dollar_amount)
+            if order_id:
+                print(f"Buy order placed for ${dollar_amount:.2f} of {sym}, Order ID: {order_id}")
+                logging.info(f"Buy order placed for ${dollar_amount:.2f} of {sym}, Order ID: {order_id}")
+                status_info = poll_order_status(order_id)
+                if status_info and status_info["status"] == "FILLED":
+                    filled_qty = status_info["filled_qty"]
+                    filled_price = status_info["avg_price"] or current_price
+                    trade = TradeHistory(
+                        symbols=sym,
+                        action='buy',
+                        quantity=filled_qty,
+                        price=filled_price,
+                        date=today_date_str
+                    )
+                    session.add(trade)
+                    position = session.query(Position).filter_by(symbols=sym).first()
+                    if position:
+                        total_qty = position.quantity + filled_qty
+                        total_cost = (position.quantity * position.avg_price) + (filled_qty * filled_price)
+                        position.avg_price = total_cost / total_qty if total_qty else filled_price
+                        position.quantity = total_qty
                     else:
-                        print(f"Buy order for {sym} not filled or failed (Status: {status_info['status'] if status_info else 'Unknown'}).")
-                        logging.info(f"Buy order for {sym} not filled or failed (Status: {status_info['status'] if status_info else 'Unknown'}).")
+                        position = Position(
+                            symbols=sym,
+                            quantity=filled_qty,
+                            avg_price=filled_price,
+                            purchase_date=today_date_str
+                        )
+                        session.add(position)
+                    session.commit()
+                    with open(csv_filename, mode='a', newline='') as csv_file:
+                        csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+                        csv_writer.writerow({
+                            'Date': today_date_str,
+                            'Buy': 'Buy',
+                            'Sell': ' ',
+                            'Quantity': filled_qty,
+                            'Symbol': sym,
+                            'Price Per Share': filled_price
+                        })
+                    send_alert(
+                        f"Bought {filled_qty:.4f} of {sym} at ${filled_price:.2f}",
+                        subject=f"Trade Executed: Bought {sym}"
+                    )
+                    acc = client_get_account()
+                    buying_power = float(acc['buying_power_cash'])
+                    print(f"Updated buying power after buying {sym}: ${buying_power:.2f}")
+                    logging.info(f"Updated buying power after buying {sym}: ${buying_power:.2f}")
                 else:
-                    print(f"Failed to place buy order for {sym}.")
-                    logging.info(f"Failed to place buy order for {sym}.")
+                    print(f"Buy order for {sym} not filled or failed (Status: {status_info['status'] if status_info else 'Unknown'}).")
+                    logging.info(f"Buy order for {sym} not filled or failed (Status: {status_info['status'] if status_info else 'Unknown'}).")
+            else:
+                print(f"Failed to place buy order for {sym}.")
+                logging.info(f"Failed to place buy order for {sym}.")
         except Exception as e:
             session.rollback()
             logging.error(f"Error in buy_cryptos: {e}")
@@ -1318,10 +1276,10 @@ def sell_cryptos():
         logging.info("Starting sell_cryptos function")
         session = SessionLocal()
         try:
-            positions = session.query(Position).filter(Position.quantity > 0).all()
+            positions = session.query(Position).filter(Position.quantity > 0, Position.symbols == 'BTC').all()
             if not positions:
-                print("No positions to sell.")
-                logging.info("No positions to sell")
+                print("No BTC positions to sell.")
+                logging.info("No BTC positions to sell")
                 return
             for pos in positions:
                 sym = pos.symbols
@@ -1473,8 +1431,8 @@ def sell_cryptos():
 
 def main():
     initialize_csv()
-    print(f"Starting trading bot at {datetime.now(eastern).strftime('%Y-%m-%d %H:%M:%S %Z')}...")
-    logging.info(f"Starting trading bot at {datetime.now(eastern).strftime('%Y-%m-%d %H:%M:%S %Z')}")
+    print(f"Starting trading bot for BTC at {datetime.now(eastern).strftime('%Y-%m-%d %H:%M:%S %Z')}...")
+    logging.info(f"Starting trading bot for BTC at {datetime.now(eastern).strftime('%Y-%m-%d %H:%M:%S %Z')}")
     if not fetch_token_and_account():
         print("Failed to initialize token and account. Exiting.")
         logging.error("Failed to initialize token and account. Exiting")
@@ -1491,15 +1449,9 @@ def main():
             symbols_to_sell_dict = load_positions_from_database()
             if PRINT_ROBOT_STORED_BUY_AND_SELL_LIST_DATABASE:
                 print_database_tables()
-            symbols_to_buy_list = get_symbols_to_buy()
-            if PRINT_SYMBOLS_TO_BUY:
-                print(f"Symbols to buy: {symbols_to_buy_list}")
-                logging.info(f"Symbols to buy: {symbols_to_buy_list}")
-            buy_cryptos(symbols_to_sell_dict, symbols_to_buy_list)
-            sell_cryptos()
             check_price_moves()
-            # check_stop_order_status()  # Disabled for crypto
-            # monitor_stop_losses()  # Disabled for crypto
+            buy_cryptos(symbols_to_sell_dict)
+            sell_cryptos()
             acc = client_get_account()
             total_equity = acc['equity']
             buying_power = acc['buying_power_cash']
