@@ -37,7 +37,7 @@ PRINT_DATABASE = True  # Set to True to view positions to sell
 DEBUG = False  # Set to False for faster execution
 ALL_BUY_ORDERS_ARE_5_DOLLARS = False  # When True, every buy order is a $5.00 fractional share market day order
 FRACTIONAL_BUY_ORDERS = True  # Enable fractional share orders
-POINT_THRESHOLD = 50  # Threshold for buy/sell action
+POINT_THRESHOLD = 100  # Threshold for buy/sell action
 
 # Global variables
 YOUR_SECRET_KEY = os.getenv("YOUR_SECRET_KEY")
@@ -659,6 +659,15 @@ def calculate_technical_indicators(symbol, lookback_days=200):
             historical_data['adx'] = np.nan
             historical_data['plus_di'] = np.nan
             historical_data['minus_di'] = np.nan
+        try:
+            slowk, slowd = talib.STOCH(historical_data['high'].values, historical_data['low'].values, historical_data['close'].values, fastk_period=14, slowk_period=3, slowd_period=3)
+            historical_data['slowk'] = slowk
+            historical_data['slowd'] = slowd
+        except Exception as e:
+            print(f"Error calculating Stochastic for {symbol}: {e}")
+            logging.error(f"Error calculating Stochastic for {symbol}: {e}")
+            historical_data['slowk'] = np.nan
+            historical_data['slowd'] = np.nan
         historical_data['volume'] = historical_data['volume']
         print(f"Technical indicators calculated for {symbol}.")
         logging.info(f"Technical indicators calculated for {symbol}")
@@ -671,7 +680,7 @@ def calculate_technical_indicators(symbol, lookback_days=200):
 
 def print_technical_indicators(symbol, historical_data):
     print(f"\nTechnical Indicators for {symbol}:\n")
-    tail_data = historical_data[['close', 'macd', 'signal', 'rsi', 'upper_bb', 'middle_bb', 'lower_bb', 'sma_200', 'vwap', 'adx', 'plus_di', 'minus_di', 'volume']].tail()
+    tail_data = historical_data[['close', 'macd', 'signal', 'rsi', 'upper_bb', 'middle_bb', 'lower_bb', 'sma_200', 'vwap', 'adx', 'plus_di', 'minus_di', 'volume', 'slowk', 'slowd']].tail()
     for idx, row in tail_data.iterrows():
         close_color = GREEN if row['close'] >= 0 else RED
         macd_value = row['macd']
@@ -702,35 +711,16 @@ def print_technical_indicators(symbol, historical_data):
         adx_display = f"{adx:.2f}" if not np.isnan(adx) else "N/A"
         plus_di_display = f"{plus_di:.2f}" if not np.isnan(plus_di) else "N/A"
         minus_di_display = f"{minus_di:.2f}" if not np.isnan(minus_di) else "N/A"
+        slowk = row['slowk']
+        slowd = row['slowd']
+        slowk_display = f"{slowk:.2f}" if not np.isnan(slowk) else "N/A"
+        slowd_display = f"{slowd:.2f}" if not np.isnan(slowd) else "N/A"
         print(f"Time: {idx} | Close: {close_color}${row['close']:.2f}{RESET} | "
               f"MACD: {macd_color}{macd_display}{RESET} (Signal: {signal_display}) | "
               f"RSI: {rsi_display} | Upper BB: {upper_display} | Middle BB: {middle_display} | Lower BB: {lower_display} | "
-              f"SMA200: {sma_display} | VWAP: {vwap_display} | ADX: {adx_display} | +DI: {plus_di_display} | -DI: {minus_di_display} | Volume: {row['volume']:.0f}")
+              f"SMA200: {sma_display} | VWAP: {vwap_display} | ADX: {adx_display} | +DI: {plus_di_display} | -DI: {minus_di_display} | Volume: {row['volume']:.0f} | "
+              f"SlowK: {slowk_display} | SlowD: {slowd_display}")
     print("")
-
-@sleep_and_retry
-@limits(calls=CALLS, period=PERIOD)
-def get_daily_rsi(symbol):
-    print(f"Calculating daily RSI for {symbol} using ccxt...")
-    logging.info(f"Calculating daily RSI for {symbol}")
-    exchange = ccxt.coinbase()
-    symbol_usd = f"{symbol}/USD"
-    try:
-        data = exchange.fetch_ohlcv(symbol_usd, timeframe='1d', limit=30)
-        historical_data = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        if historical_data.empty or len(historical_data['close']) < 14:
-            print(f"Insufficient daily data for {symbol} (rows: {len(historical_data)}).")
-            logging.error(f"Insufficient daily data for {symbol} (rows: {len(historical_data)}).")
-            return 50.00
-        rsi = talib.RSI(historical_data['close'], timeperiod=14)[-1]
-        rsi_value = round(rsi, 2) if not np.isnan(rsi) else 50.00
-        print(f"Daily RSI for {symbol}: {rsi_value}")
-        logging.info(f"Daily RSI for {symbol}: {rsi_value}")
-        return rsi_value
-    except Exception as e:
-        print(f"Error calculating daily RSI for {symbol}: {e}")
-        logging.error(f"Error calculating daily RSI for {symbol}: {e}")
-        return 50.00
 
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
@@ -789,54 +779,64 @@ def calculate_buy_points(symbol):
     if historical_data is None:
         return 0
 
+    previous_close = historical_data['close'].iloc[-1]
+
     # RSI (daily)
     rsi = historical_data['rsi'].iloc[-1]
     if not np.isnan(rsi) and rsi < 30:
-        points += 10
-
-    # Daily RSI
-    daily_rsi = get_daily_rsi(symbol)
-    if daily_rsi < 30:
-        points += 10
+        points += 25
 
     # MACD crossover
     macd = historical_data['macd']
     signal = historical_data['signal']
     if len(macd) >= 2 and not np.isnan(macd.iloc[-1]) and not np.isnan(signal.iloc[-1]) and not np.isnan(macd.iloc[-2]) and not np.isnan(signal.iloc[-2]):
         if macd.iloc[-1] > signal.iloc[-1] and macd.iloc[-2] < signal.iloc[-2]:
-            points += 10
+            points += 25
 
     # Volume
     volume = historical_data['volume']
     if volume.iloc[-1] > volume.mean():
-        points += 10
+        points += 25
 
     # Bollinger Bands
     lower_bb = historical_data['lower_bb'].iloc[-1]
     if not np.isnan(lower_bb) and current_price < lower_bb:
-        points += 10
+        points += 25
 
-    # ATR low
-    atr_low = get_atr_low_price(symbol)
-    if atr_low is not None and current_price < atr_low:
-        points += 10
+    atr = get_average_true_range(symbol)
+    if atr is not None:
+        atr_low = previous_close - 0.10 * atr
+        if current_price < atr_low:
+            points += 25
 
     # VWAP
     vwap = historical_data['vwap'].iloc[-1]
     if not np.isnan(vwap) and current_price > vwap:
-        points += 10
+        points += 25
 
     # SMA
     sma_200 = historical_data['sma_200'].iloc[-1]
     if not np.isnan(sma_200) and current_price > sma_200:
-        points += 10
+        points += 25
 
     # Trending momentum (ADX)
     adx = historical_data['adx'].iloc[-1]
     plus_di = historical_data['plus_di'].iloc[-1]
     minus_di = historical_data['minus_di'].iloc[-1]
     if not np.isnan(adx) and adx > 25 and not np.isnan(plus_di) and not np.isnan(minus_di) and plus_di > minus_di:
-        points += 10
+        points += 25
+
+    # Stochastic
+    slowk = historical_data['slowk'].iloc[-1]
+    slowd = historical_data['slowd'].iloc[-1]
+    if not np.isnan(slowk) and slowk < 20:
+        points += 25
+    if len(historical_data) >= 2:
+        prev_slowk = historical_data['slowk'].iloc[-2]
+        prev_slowd = historical_data['slowd'].iloc[-2]
+        if not np.isnan(slowk) and not np.isnan(slowd) and not np.isnan(prev_slowk) and not np.isnan(prev_slowd):
+            if slowk > slowd and prev_slowk < prev_slowd:
+                points += 25
 
     # Bullish candlestick patterns
     points += get_candlestick_points(symbol, 'buy')
@@ -860,54 +860,64 @@ def calculate_sell_points(symbol):
     if historical_data is None:
         return 0
 
+    previous_close = historical_data['close'].iloc[-1]
+
     # RSI (daily)
     rsi = historical_data['rsi'].iloc[-1]
     if not np.isnan(rsi) and rsi > 70:
-        points += 10
-
-    # Daily RSI
-    daily_rsi = get_daily_rsi(symbol)
-    if daily_rsi > 70:
-        points += 10
+        points += 25
 
     # MACD crossover
     macd = historical_data['macd']
     signal = historical_data['signal']
     if len(macd) >= 2 and not np.isnan(macd.iloc[-1]) and not np.isnan(signal.iloc[-1]) and not np.isnan(macd.iloc[-2]) and not np.isnan(signal.iloc[-2]):
         if macd.iloc[-1] < signal.iloc[-1] and macd.iloc[-2] > signal.iloc[-2]:
-            points += 10
+            points += 25
 
     # Volume
     volume = historical_data['volume']
     if volume.iloc[-1] > volume.mean():
-        points += 10
+        points += 25
 
     # Bollinger Bands
     upper_bb = historical_data['upper_bb'].iloc[-1]
     if not np.isnan(upper_bb) and current_price > upper_bb:
-        points += 10
+        points += 25
 
-    # ATR high
-    atr_high = get_atr_high_price(symbol)
-    if atr_high is not None and current_price > atr_high:
-        points += 10
+    atr = get_average_true_range(symbol)
+    if atr is not None:
+        atr_high = previous_close + 0.40 * atr
+        if current_price > atr_high:
+            points += 25
 
     # VWAP
     vwap = historical_data['vwap'].iloc[-1]
     if not np.isnan(vwap) and current_price < vwap:
-        points += 10
+        points += 25
 
     # SMA
     sma_200 = historical_data['sma_200'].iloc[-1]
     if not np.isnan(sma_200) and current_price < sma_200:
-        points += 10
+        points += 25
 
     # Trending momentum (ADX)
     adx = historical_data['adx'].iloc[-1]
     plus_di = historical_data['plus_di'].iloc[-1]
     minus_di = historical_data['minus_di'].iloc[-1]
     if not np.isnan(adx) and adx > 25 and not np.isnan(plus_di) and not np.isnan(minus_di) and plus_di < minus_di:
-        points += 10
+        points += 25
+
+    # Stochastic
+    slowk = historical_data['slowk'].iloc[-1]
+    slowd = historical_data['slowd'].iloc[-1]
+    if not np.isnan(slowk) and slowk > 80:
+        points += 25
+    if len(historical_data) >= 2:
+        prev_slowk = historical_data['slowk'].iloc[-2]
+        prev_slowd = historical_data['slowd'].iloc[-2]
+        if not np.isnan(slowk) and not np.isnan(slowd) and not np.isnan(prev_slowk) and not np.isnan(prev_slowd):
+            if slowk < slowd and prev_slowk > prev_slowd:
+                points += 25
 
     # Bearish candlestick patterns
     points += get_candlestick_points(symbol, 'sell')
@@ -964,36 +974,10 @@ def get_candlestick_points(symbol, side):
                 if res[-1] < 0:
                     detected = True
                     break
-        return 10 if detected else 0
+        return 25 if detected else 0
     except Exception as e:
         logging.error(f"Error in candlestick detection for {symbol}: {e}")
         return 0
-
-@sleep_and_retry
-@limits(calls=CALLS, period=PERIOD)
-def get_atr_high_price(symbol):
-    print(f"Calculating ATR high price for {symbol}...")
-    logging.info(f"Calculating ATR high price for {symbol}")
-    atr_value = get_average_true_range(symbol)
-    current_price = client_get_quote(symbol)
-    atr_high = round(current_price + 0.40 * atr_value, 4) if current_price and atr_value else None
-    price_color = GREEN if atr_high and atr_high >= 0 else RED
-    print(f"ATR high price for {symbol}: {price_color}${atr_high:.4f}{RESET}" if atr_high else f"Failed to calculate ATR high price for {symbol}.")
-    logging.info(f"ATR high price for {symbol}: ${atr_high:.4f}" if atr_high else f"Failed to calculate ATR high price for {symbol}.")
-    return atr_high
-
-@sleep_and_retry
-@limits(calls=CALLS, period=PERIOD)
-def get_atr_low_price(symbol):
-    print(f"Calculating ATR low price for {symbol}...")
-    logging.info(f"Calculating ATR low price for {symbol}")
-    atr_value = get_average_true_range(symbol)
-    current_price = client_get_quote(symbol)
-    atr_low = round(current_price - 0.10 * atr_value, 4) if current_price and atr_value else None
-    price_color = GREEN if atr_low and atr_low >= 0 else RED
-    print(f"ATR low price for {symbol}: {price_color}${atr_low:.4f}{RESET}" if atr_low else f"Failed to calculate ATR low price for {symbol}.")
-    logging.info(f"ATR low price for {symbol}: ${atr_low:.4f}" if atr_low else f"Failed to calculate ATR low price for {symbol}.")
-    return atr_low
 
 def get_previous_price(symbol):
     return previous_prices.get(symbol, client_get_quote(symbol) or 0.0)
@@ -1456,10 +1440,10 @@ def main():
             total_equity = acc['equity']
             buying_power = acc['buying_power_cash']
             print(f"\n{'='*60}")
-            print(f"Waiting 45 seconds. Total equity: ${total_equity:.2f}, Buying power: ${buying_power:.2f}")
+            print(f"Waiting 15 seconds. Total equity: ${total_equity:.2f}, Buying power: ${buying_power:.2f}")
             print(f"{'='*60}\n")
-            logging.info(f"Waiting 45 seconds. Total equity: ${total_equity:.2f}, Buying power: ${buying_power:.2f}")
-            time.sleep(45)
+            logging.info(f"Waiting 15 seconds. Total equity: ${total_equity:.2f}, Buying power: ${buying_power:.2f}")
+            time.sleep(15)
         except Exception as e:
             logging.error(f"Error in main loop: {e}")
             print(f"Error in main loop: {e}")
