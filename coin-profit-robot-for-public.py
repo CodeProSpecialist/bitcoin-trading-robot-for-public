@@ -491,10 +491,39 @@ def client_get_account():
         logging.error(f"Account fetch error: {e}")
         return {'equity': 0.0, 'buying_power_cash': 0.0, 'cash_only_buying_power': 0.0, 'cash_on_hand': 0.0, 'accountId': account_id}
 
+
+@sleep_and_retry
+@limits(calls=CALLS, period=PERIOD)
+def get_quote_from_public_api(symbol):
+    """Fetch current quote from Public.com API for a given symbol."""
+    if not account_id:
+        logging.error("No BROKERAGE accountId for quote fetch")
+        return None
+    trading_symbol = get_trading_symbol(symbol)  # Use API symbol (e.g., BTC-CRYPTO)
+    url = f"{BASE_URL}/trading/{account_id}/quote/{trading_symbol}"
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=10)
+        if resp.status_code >= 400:
+            logging.warning(f"Quote fetch failed for {trading_symbol}: HTTP {resp.status_code} - {resp.text}")
+            return None
+        resp.raise_for_status()
+        quote_data = resp.json()
+        # Assuming the response has a 'lastPrice' or 'price' field; adjust based on actual API schema
+        last_price = float(quote_data.get('lastPrice', quote_data.get('price', 0)))
+        if last_price <= 0:
+            logging.warning(f"Invalid quote price for {trading_symbol}: {last_price}")
+            return None
+        print(f"Public.com quote for {symbol}: ${last_price:.5f}")
+        logging.info(f"Public.com quote for {symbol}: ${last_price:.5f}")
+        return round(last_price, 5)
+    except Exception as e:
+        logging.error(f"Error fetching quote from Public.com for {symbol}: {e}")
+        return None
+
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
 def client_list_positions():
-    """Fetch current positions from public.com API."""
+    """Fetch current positions from public.com API, with real-time prices from Public.com."""
     try:
         if not account_id:
             logging.error("No BROKERAGE accountId")
@@ -539,12 +568,16 @@ def client_list_positions():
                 except (ValueError, TypeError):
                     logging.warning(f"Skipping position with invalid unitCost: {p}")
                     avg = 0.0
+                # Fetch last_price from Public.com API (embedded or quote endpoint)
                 last_price_dict = p.get('lastPrice', {})
-                try:
-                    last_price = round(float(last_price_dict.get('lastPrice', 0)), 5)
-                except (ValueError, TypeError):
-                    last_price = None
-                    logging.warning(f"Invalid last price for {sym}: {last_price_dict}")
+                embedded_last_price = round(float(last_price_dict.get('lastPrice', 0)), 5) if last_price_dict.get('lastPrice') else None
+                if embedded_last_price is None or embedded_last_price <= 0:
+                    # Fallback to dedicated quote API call
+                    last_price = get_quote_from_public_api(sym)
+                else:
+                    last_price = embedded_last_price
+                if last_price is None:
+                    logging.warning(f"No valid last price for {sym}. Setting to None.")
                 instrument_gain = p.get('instrumentGain', {})
                 try:
                     gain_percentage = float(instrument_gain.get('gainPercentage', 0))
@@ -563,7 +596,7 @@ def client_list_positions():
                         'avg_entry_price': avg,
                         'purchase_date': date_str,
                         'type': asset_type,
-                        'last_price': last_price,
+                        'last_price': last_price,  # Now always from Public.com
                         'gain_percentage': gain_percentage
                     })
             except Exception as e:
@@ -577,6 +610,7 @@ def client_list_positions():
         logging.error(f"Positions fetch error: {e}")
         print(f"Positions fetch error: {e}")
         return []
+
 
 def list_owned_positions():
     """List owned equity and crypto positions."""
