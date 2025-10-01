@@ -1412,6 +1412,13 @@ def sell_cryptos():
             for pos in positions:
                 sym = pos.symbols
                 trading_sym = get_trading_symbol(sym)
+                # Check position type from API data
+                api_pos = api_positions_dict.get(sym, {})
+                asset_type = api_pos.get('type', 'CRYPTO')  # Default to CRYPTO if type is missing
+                if asset_type == 'EQUITY':
+                    print(f"Skipping {sym}: Position type is EQUITY, not CRYPTO.")
+                    logging.info(f"Skipping {sym}: Position type is EQUITY, not CRYPTO")
+                    continue
                 print(f"\n{'='*60}")
                 print(f"Evaluating {sym} for sell signal...")
                 print(f"{'='*60}")
@@ -1423,7 +1430,6 @@ def sell_cryptos():
                     continue
                 
                 # Get API position data for fallback
-                api_pos = api_positions_dict.get(sym, {})
                 api_avg_price = api_pos.get('avg_entry_price', pos.avg_price)
                 api_gain_percentage = api_pos.get('gain_percentage', None)
                 
