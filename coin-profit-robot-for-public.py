@@ -1135,42 +1135,33 @@ def buy_cryptos(symbols_to_sell_dict):
             return
         data = rate_limited_fetch_ohlcv(sym, '1d', 200)
         df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        if df.empty or len(df) < 20:  # At least for BB timeperiod=20
-            print(f"Insufficient historical data for {sym} (daily rows: {len(df)}). Skipping.")
-            logging.info(f"Insufficient historical data for {sym} (daily rows: {len(df)}). Skipping")
+        if df.empty or len(df) < 20:
+            print(f"Insufficient historical data for {sym}. Skipping.")
+            logging.info(f"Insufficient historical data for {sym}. Skipping")
             return
         points = calculate_buy_points(sym)
-        if points >= POINT_THRESHOLD:
-            print(f"{sym}: Buy signal detected (Points: {points})")
-            logging.info(f"{sym}: Buy signal detected (Points: {points})")
-        else:
+        if points < POINT_THRESHOLD:
             print(f"{sym}: No buy signal (Points: {points})")
             logging.info(f"{sym}: No buy signal (Points: {points})")
             return
+
+        print(f"{sym}: Buy signal detected (Points: {points})")
+        logging.info(f"{sym}: Buy signal detected (Points: {points})")
+
         session = SessionLocal()
         try:
-            print(f"\n{'='*60}")
-            print(f"Processing buy for {sym}...")
-            print(f"{'='*60}")
-            logging.info(f"Processing buy for {sym}")
-            today_date = datetime.today().date()
-            today_date_str = today_date.strftime("%Y-%m-%d")
-            current_datetime = datetime.now(eastern)
-            current_time_str = current_datetime.strftime("Eastern Time | %I:%M:%S %p | %m-%d-%Y |")
-            print(f"Analysis time: {current_time_str}")
-            logging.info(f"Analysis time: {current_time_str}")
+            today_date_str = datetime.today().strftime("%Y-%m-%d")
             if not ensure_no_open_orders(sym):
-                print(f"Cannot buy {sym}: Open orders still exist after cancellation attempt.")
-                logging.info(f"Cannot buy {sym}: Open orders still exist after cancellation attempt.")
+                print(f"Cannot buy {sym}: Open orders still exist.")
+                logging.info(f"Cannot buy {sym}: Open orders still exist")
                 return
             acc = client_get_account()
             buying_power = float(acc['buying_power_cash'])
-            print(f"Current buying power before buying {sym}: ${buying_power:.2f}")
-            logging.info(f"Current buying power before buying {sym}: ${buying_power:.2f}")
             if buying_power < 10.00:
                 print(f"Buying power < $10.00. Stopping buy orders.")
                 logging.info(f"Buying power < $10.00. Stopping buy orders.")
                 return
+
             dollar_amount = allocation_per_risk.get(risk_levels.get(sym, "ultra-low"), 10.0)
             if ALL_BUY_ORDERS_ARE_5_DOLLARS:
                 dollar_amount = 5.00
@@ -1180,20 +1171,20 @@ def buy_cryptos(symbols_to_sell_dict):
                 print(f"Insufficient buying power for {sym}. Stopping.")
                 logging.info(f"Insufficient buying power for {sym}. Stopping.")
                 return
-            qty = dollar_amount / current_price if current_price else 0
+
+            qty = round(dollar_amount / current_price, 5)
             if qty <= 0:
                 print(f"Invalid quantity for {sym}. Skipping.")
                 logging.info(f"Invalid quantity for {sym}. Skipping.")
                 return
-            print(f"Attempting to buy ${dollar_amount:.2f} ({qty:.4f} of {sym})...")
-            logging.info(f"Attempting to buy ${dollar_amount:.2f} ({qty:.4f} of {sym})")
+
+            print(f"Attempting to buy ${dollar_amount:.2f} ({qty:.5f} of {sym})...")
+            logging.info(f"Attempting to buy ${dollar_amount:.2f} ({qty:.5f} of {sym})")
             order_id = client_place_order(sym, "BUY", amount=dollar_amount)
             if order_id:
-                print(f"Buy order placed for ${dollar_amount:.2f} of {sym}, Order ID: {order_id}")
-                logging.info(f"Buy order placed for ${dollar_amount:.2f} of {sym}, Order ID: {order_id}")
                 status_info = poll_order_status(order_id)
                 if status_info and status_info["status"] == "FILLED":
-                    filled_qty = status_info["filled_qty"]
+                    filled_qty = round(status_info["filled_qty"], 5)  # ✅ enforce 5 decimals
                     filled_price = status_info["avg_price"] or current_price
                     trade = TradeHistory(
                         symbols=sym,
@@ -1205,7 +1196,7 @@ def buy_cryptos(symbols_to_sell_dict):
                     session.add(trade)
                     position = session.query(Position).filter_by(symbols=sym).first()
                     if position:
-                        total_qty = position.quantity + filled_qty
+                        total_qty = round(position.quantity + filled_qty, 5)  # ✅ enforce 5 decimals
                         total_cost = (position.quantity * position.avg_price) + (filled_qty * filled_price)
                         position.avg_price = total_cost / total_qty if total_qty else filled_price
                         position.quantity = total_qty
@@ -1229,19 +1220,9 @@ def buy_cryptos(symbols_to_sell_dict):
                             'Price Per Share': filled_price
                         })
                     send_alert(
-                        f"Bought {filled_qty:.4f} of {sym} at ${filled_price:.2f}",
+                        f"Bought {filled_qty:.5f} of {sym} at ${filled_price:.2f}",
                         subject=f"Trade Executed: Bought {sym}"
                     )
-                    acc = client_get_account()
-                    buying_power = float(acc['buying_power_cash'])
-                    print(f"Updated buying power after buying {sym}: ${buying_power:.2f}")
-                    logging.info(f"Updated buying power after buying {sym}: ${buying_power:.2f}")
-                else:
-                    print(f"Buy order for {sym} not filled or failed (Status: {status_info['status'] if status_info else 'Unknown'}).")
-                    logging.info(f"Buy order for {sym} not filled or failed (Status: {status_info['status'] if status_info else 'Unknown'}).")
-            else:
-                print(f"Failed to place buy order for {sym}.")
-                logging.info(f"Failed to place buy order for {sym}.")
         except Exception as e:
             session.rollback()
             logging.error(f"Error in buy_cryptos: {e}")
@@ -1283,10 +1264,14 @@ def sell_cryptos():
                 profit_color = GREEN if profit_pct >= 0 else RED
                 print(f"{sym}: Current price: {profit_color}${current_price:.2f}{RESET}, Avg price: ${pos.avg_price:.2f}, Profit: {profit_color}{profit_pct:.2f}%{RESET}")
                 logging.info(f"{sym}: Current price: ${current_price:.2f}, Avg price: ${pos.avg_price:.2f}, Profit: {profit_pct:.2f}%")
+
+                # Skip if profit threshold not met
                 if profit_pct < 0.5:
                     print(f"Skipping sell for {sym}: Profit ({profit_pct:.2f}%) is less than 0.5%.")
                     logging.info(f"Skipping sell for {sym}: Profit ({profit_pct:.2f}%) is less than 0.5%")
                     continue
+
+                # Only sell on strong signal
                 if points >= POINT_THRESHOLD:
                     print(f"{sym}: Sell signal detected (Points: {points})")
                     logging.info(f"{sym}: Sell signal detected (Points: {points})")
@@ -1295,7 +1280,6 @@ def sell_cryptos():
                         logging.info(f"Cannot sell {sym}: Open orders exist")
                         continue
 
-                    # Round quantity to 5 decimal places before selling
                     sell_qty = round(pos.quantity, 5)
                     if sell_qty <= 0:
                         print(f"Skipped sell for {sym}: Rounded quantity is zero.")
@@ -1315,7 +1299,7 @@ def sell_cryptos():
                                 logging.info(f"Placed sell order for {sell_qty:.5f} of {sym}, Order ID: {order_id}")
                                 status = poll_order_status(order_id, timeout=300)
                                 if status and status["status"] == "FILLED":
-                                    filled_qty = status["filled_qty"]
+                                    filled_qty = round(status["filled_qty"], 5)
                                     filled_price = status["avg_price"] or current_price
                                     trade = TradeHistory(
                                         symbols=sym,
@@ -1325,12 +1309,16 @@ def sell_cryptos():
                                         date=datetime.now(eastern).strftime("%Y-%m-%d")
                                     )
                                     session.add(trade)
-                                    pos.quantity -= filled_qty
-                                    if pos.quantity <= 0:
+
+                                    # ✅ Update remaining position, round to 5 decimals
+                                    pos.quantity = round(pos.quantity - filled_qty, 5)
+                                    if pos.quantity <= 0.00001:  # ✅ remove dust
                                         if pos.stop_order_id:
                                             client_cancel_order({'orderId': pos.stop_order_id, 'instrument': {'symbol': sym}})
                                         session.delete(pos)
+
                                     session.commit()
+
                                     with open(csv_filename, mode='a', newline='') as csv_file:
                                         csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
                                         csv_writer.writerow({
@@ -1369,11 +1357,9 @@ def sell_cryptos():
                                     quantity=adjusted_qty
                                 )
                                 if order_id:
-                                    print(f"Retry sell order placed for {adjusted_qty:.5f} of {sym}, Order ID: {order_id}")
-                                    logging.info(f"Retry sell order placed for {adjusted_qty:.5f} of {sym}, Order ID: {order_id}")
                                     status = poll_order_status(order_id, timeout=300)
                                     if status and status["status"] == "FILLED":
-                                        filled_qty = status["filled_qty"]
+                                        filled_qty = round(status["filled_qty"], 5)
                                         filled_price = status["avg_price"] or current_price
                                         trade = TradeHistory(
                                             symbols=sym,
@@ -1383,11 +1369,13 @@ def sell_cryptos():
                                             date=datetime.now(eastern).strftime("%Y-%m-%d")
                                         )
                                         session.add(trade)
-                                        pos.quantity -= filled_qty
-                                        if pos.quantity <= 0:
+
+                                        pos.quantity = round(pos.quantity - filled_qty, 5)
+                                        if pos.quantity <= 0.00001:
                                             if pos.stop_order_id:
                                                 client_cancel_order({'orderId': pos.stop_order_id, 'instrument': {'symbol': sym}})
                                             session.delete(pos)
+
                                         session.commit()
                                         with open(csv_filename, mode='a', newline='') as csv_file:
                                             csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
