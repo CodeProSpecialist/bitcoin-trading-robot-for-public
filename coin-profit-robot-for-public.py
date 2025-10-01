@@ -187,16 +187,31 @@ def cleanup_invalid_positions():
 
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
-def client_get_quote(symbol, retries=3):
-    for attempt in range(retries):
-        try:
-            return get_cached_data(symbol, 'current_price_ccxt', _fetch_current_price_ccxt, symbol)
-        except Exception as e:
-            if attempt == retries - 1:
-                logging.error(f"All retries failed for {symbol}: {e}")
-                return None
-            time.sleep(2 ** attempt)
-    return None
+def client_get_quote(symbol):
+    """Fetch current quote from Public.com API for a given symbol."""
+    if not account_id:
+        logging.error("No BROKERAGE accountId for quote fetch")
+        return None
+    trading_symbol = get_trading_symbol(symbol)  # e.g., BTC-CRYPTO
+    url = f"{BASE_URL}/trading/{account_id}/quote/{trading_symbol}"
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=10)
+        if resp.status_code >= 400:
+            logging.warning(f"Quote fetch failed for {trading_symbol}: HTTP {resp.status_code} - {resp.text}")
+            return None
+        resp.raise_for_status()
+        quote_data = resp.json()
+        # Adjust field name based on Public.com API schema (e.g., 'lastPrice' or 'price')
+        last_price = float(quote_data.get('lastPrice', quote_data.get('price', 0)))
+        if last_price <= 0:
+            logging.warning(f"Invalid quote price for {trading_symbol}: {last_price}")
+            return None
+        print(f"Public.com quote for {symbol}: ${last_price:.5f}")
+        logging.info(f"Public.com quote for {symbol}: ${last_price:.5f}")
+        return round(last_price, 5)
+    except Exception as e:
+        logging.error(f"Error fetching quote from Public.com for {symbol}: {e}")
+        return None
 
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
