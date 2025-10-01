@@ -1292,11 +1292,14 @@ def sell_cryptos():
                         print(f"Cannot sell {sym}: Open orders exist.")
                         logging.info(f"Cannot sell {sym}: Open orders exist")
                         continue
-                    sell_qty = round(pos.quantity, 5) if FRACTIONAL_BUY_ORDERS else int(pos.quantity)
-                    if sell_qty == 0:
-                        print(f"Skipped sell for {sym}: Quantity {sell_qty} is zero.")
-                        logging.info(f"Skipped sell for {sym}: Quantity {sell_qty} is zero")
+
+                    # Round quantity to 5 decimal places before selling
+                    sell_qty = round(pos.quantity, 5)
+                    if sell_qty <= 0:
+                        print(f"Skipped sell for {sym}: Rounded quantity is zero.")
+                        logging.info(f"Skipped sell for {sym}: Rounded quantity is zero")
                         continue
+
                     for attempt in range(3):
                         try:
                             order_id = client_place_order(
@@ -1351,6 +1354,10 @@ def sell_cryptos():
                                 print(f"HTTP 400 error on attempt {attempt + 1} for {sym}: {e.response.text}")
                                 logging.error(f"HTTP 400 error for {sym}: {e.response.text}")
                                 adjusted_qty = round(pos.quantity, 5)
+                                if adjusted_qty <= 0:
+                                    print(f"Retry skipped: Rounded quantity is zero for {sym}")
+                                    logging.info(f"Retry skipped: Rounded quantity is zero for {sym}")
+                                    break
                                 print(f"Retrying with adjusted quantity: {adjusted_qty:.5f}")
                                 logging.info(f"Retrying with adjusted quantity: {adjusted_qty:.5f}")
                                 order_id = client_place_order(
