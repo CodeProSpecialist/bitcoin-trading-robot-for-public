@@ -1,5 +1,7 @@
 # Digital Coin Trading Robot for Public
 
+( # this project is not ready because it is under construction )
+
 Built with Precision
 
 Designed using Python and leveraging the Public.com Trading API, this bot integrates seamlessly with your Public.com account. 
