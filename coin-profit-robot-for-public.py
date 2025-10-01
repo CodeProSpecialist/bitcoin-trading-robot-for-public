@@ -485,29 +485,32 @@ def client_list_positions():
         resp = requests.get(f"{BASE_URL}/trading/{account_id}/portfolio/v2", headers=HEADERS, timeout=10)
         resp.raise_for_status()
         data = resp.json()
-        pos_list = data.get('positions', [])
+        pos_list = data.get('positions', []) or []
         out = []
+
         for p in pos_list:
-            inst = p.get('instrument', {})
+            if not isinstance(p, dict):  # skip invalid entries
+                continue
+            inst = p.get('instrument') or {}  # fallback to {}
             sym = inst.get('symbol')
             inst_type = inst.get('type')
 
             # Only include CRYPTO positions
-            if inst_type != 'CRYPTO':
+            if inst_type != 'CRYPTO' or not sym:
                 continue  
 
-            qty = round(float(p.get('quantity', 0)), 5)
+            qty = round(float(p.get('quantity', 0) or 0), 5)
             if qty <= 0:
-                continue  # skip empty or dust
+                continue
 
-            avg = round(float(p.get('costBasis', {}).get('unitCost', 0)), 2)
-            opened_at = p.get('openedAt', datetime.now(eastern).strftime("%Y-%m-%d"))
+            avg = round(float((p.get('costBasis') or {}).get('unitCost', 0) or 0), 2)
+            opened_at = p.get('openedAt') or datetime.now(eastern).strftime("%Y-%m-%d")
             try:
                 date_str = datetime.fromisoformat(opened_at.replace('Z', '+00:00')).astimezone(eastern).strftime("%Y-%m-%d")
-            except ValueError:
+            except Exception:
                 date_str = datetime.now(eastern).strftime("%Y-%m-%d")
 
-            current_price = client_get_quote(sym)
+            current_price = client_get_quote(sym) or 0.0
             price_color = GREEN if current_price >= 0 else RED
             print(f"Position: {sym} (CRYPTO) | Qty: {qty:.5f} | Avg Price: ${avg:.2f} | Current Price: {price_color}${current_price:.2f}{RESET}")
 
@@ -517,9 +520,11 @@ def client_list_positions():
                 'avg_entry_price': avg,
                 'purchase_date': date_str
             })
+
         return out
     except Exception as e:
         logging.error(f"Positions fetch error: {e}")
+        print(f"Positions fetch error: {e}")
         return []
 
 def sync_db_with_api():
