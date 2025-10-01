@@ -55,6 +55,13 @@ risk_levels = {
 allocation_per_risk = {
     "ultra-low": 10.0
 }
+
+OWNED_POSITIONS_BASE_URL = f"https://api.public.com/userapigateway/trading/{ACCOUNT_ID}/portfolio/v2"
+
+HEADERS = {
+    "Authorization": f"Bearer {API_KEY}"
+}
+
 symbols_to_sell_dict = {}
 today_date = datetime.today().date()
 today_datetime = datetime.now(pytz.timezone('US/Eastern'))
