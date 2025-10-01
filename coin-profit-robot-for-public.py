@@ -1242,6 +1242,7 @@ def rate_limited_fetch_ohlcv(sym, timeframe, limit):
         print(f"Error fetching OHLCV for {sym}: {e}")
         return []
 
+
 def buy_cryptos(symbols_to_sell_dict):
     if task_running['buy_cryptos']:
         print("buy_cryptos already running. Skipping.")
@@ -1401,6 +1402,7 @@ def buy_cryptos(symbols_to_sell_dict):
             session.close()
     finally:
         task_running['buy_cryptos'] = False
+
 
 def sell_cryptos():
     if task_running['sell_cryptos']:
