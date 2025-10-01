@@ -1670,9 +1670,9 @@ def main_loop():
             keys_to_remove = [key for key, value in data_cache.items() if current_time - value['timestamp'] > CACHE_EXPIRY]
             for key in keys_to_remove:
                 del data_cache[key]
-            print(f"Cycle completed. Waiting 2 minutes before next cycle...")
-            logging.info(f"Cycle completed. Waiting 2 minutes before next cycle")
-            time.sleep(120)  # Wait 2 minutes
+            print(f" Waiting 30 seconds. ")
+            logging.info(f"Waiting 30 seconds. ")
+            time.sleep(30)  # Wait 30 seconds
         except KeyboardInterrupt:
             print("\nKeyboardInterrupt detected. Exiting gracefully...")
             logging.info("KeyboardInterrupt detected. Exiting gracefully")
