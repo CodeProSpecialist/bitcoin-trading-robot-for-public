@@ -532,7 +532,7 @@ def sync_db_with_api():
         try:
             for attempt in range(3):
                 try:
-                    api_positions = client_list_positions()
+                    api_positions = client_list_positions()  # now returns all CRYPTO
                     break
                 except Exception as e:
                     logging.error(f"Retry {attempt + 1}/3: Error syncing DB with API: {e}")
@@ -540,14 +540,16 @@ def sync_db_with_api():
                     if attempt == 2:
                         logging.error("All retries failed for syncing DB with API.")
                         return
+
             api_symbols = {pos['symbol'] for pos in api_positions}
+
+            # Insert/update CRYPTO positions
             for pos in api_positions:
                 symbol = pos['symbol']
-                if symbol != 'BTC':
-                    continue
                 qty = round(pos['qty'], 5)
                 avg_price = pos['avg_entry_price']
                 purchase_date = pos['purchase_date']
+
                 db_pos = session.query(Position).filter_by(symbols=symbol).first()
                 if db_pos:
                     db_pos.quantity = qty
@@ -560,17 +562,20 @@ def sync_db_with_api():
                         purchase_date=purchase_date
                     )
                     session.add(db_pos)
-            # Only delete BTC position if essentially zero
+
+            # Clean up positions no longer in API or dust
             for db_pos in session.query(Position).all():
-                if db_pos.symbols == "BTC" and db_pos.quantity <= 0.00001:
+                if db_pos.symbols not in api_symbols or db_pos.quantity <= 0.00001:
                     if db_pos.stop_order_id:
                         client_cancel_order({'orderId': db_pos.stop_order_id, 'instrument': {'symbol': db_pos.symbols}})
                     session.delete(db_pos)
+
             session.commit()
-            print("Database synced with API for BTC.")
+            print("Database synced with API for all CRYPTO positions.")
         except Exception as e:
             session.rollback()
             logging.error(f"Error syncing DB with API: {e}")
+            print(f"Error syncing DB with API: {e}")
         finally:
             session.close()
     finally:
