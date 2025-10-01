@@ -32,12 +32,12 @@ CYAN = "\033[96m"
 RESET = "\033[0m"
 
 # Configuration flags
-PRINT_ROBOT_STORED_BUY_AND_SELL_LIST_DATABASE = True  # Set to True to view database
-PRINT_DATABASE = True  # Set to True to view positions to sell
-DEBUG = False  # Set to False for faster execution
-ALL_BUY_ORDERS_ARE_5_DOLLARS = False  # When True, every buy order is a $5.00 fractional share market day order
-FRACTIONAL_BUY_ORDERS = True  # Enable fractional share orders
-POINT_THRESHOLD = 100  # Threshold for buy/sell action
+PRINT_ROBOT_STORED_BUY_AND_SELL_LIST_DATABASE = True
+PRINT_DATABASE = True
+DEBUG = False
+ALL_BUY_ORDERS_ARE_5_DOLLARS = False
+FRACTIONAL_BUY_ORDERS = True
+POINT_THRESHOLD = 100
 
 # Global variables
 YOUR_SECRET_KEY = os.getenv("YOUR_SECRET_KEY")
@@ -64,8 +64,8 @@ price_changes = {}
 current_price = 0
 today_date_str = today_date.strftime("%Y-%m-%d")
 qty = 0
-price_history = {}  # BTC -> interval -> list of prices
-last_stored = {}  # BTC -> interval -> last_timestamp
+price_history = {}
+last_stored = {}
 interval_map = {
     '1min': 60,
     '5min': 300,
@@ -78,10 +78,10 @@ interval_map = {
 crypto_data = {}
 previous_prices = {}
 data_cache = {}
-CACHE_EXPIRY = 120  # 2 minutes
-CALLS = 10  # Max API calls per period
-PERIOD = 1  # Period in seconds
-RETRY_COUNT = 3  # Retry failed cancellations
+CACHE_EXPIRY = 120
+CALLS = 10
+PERIOD = 1
+RETRY_COUNT = 3
 task_running = {
     'buy_cryptos': False,
     'sell_cryptos': False,
@@ -90,8 +90,7 @@ task_running = {
     'monitor_stop_losses': False,
     'sync_db_with_api': False,
     'refresh_token_if_needed': False
-}  # Task running flags
-
+}
 db_lock = threading.Lock()
 
 # Timezone
@@ -206,7 +205,7 @@ def place_market_order(symbol, side, fractional=False, amount=None, quantity=Non
     url = f"{BASE_URL}/trading/{account_id}/order"
     order_id = str(uuid4())
     is_fractional = fractional or (amount is not None) or (quantity is not None and quantity % 1 != 0)
-    expiration = {"timeInForce": "DAY"}  # All market orders are DAY
+    expiration = {"timeInForce": "DAY"}
     payload = {
         "orderId": order_id,
         "instrument": {"symbol": symbol, "type": "CRYPTO"},
@@ -255,7 +254,7 @@ def client_place_order(symbol, side, amount=None, quantity=None, order_type="MAR
                 amount=amount,
                 quantity=quantity
             )
-        else:  # STOP - Note: Stop orders may not be supported for crypto on Public.com
+        else:
             logging.warning(f"Stop orders may not be supported for crypto. Skipping for {symbol}.")
             return None
         if order_response.get('error'):
@@ -309,7 +308,6 @@ def client_get_order_status(order_id):
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
 def client_list_all_orders():
-    """List all orders and print full details for debugging."""
     try:
         if not account_id:
             logging.error("No BROKERAGE accountId")
@@ -331,7 +329,6 @@ def client_list_all_orders():
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
 def client_cancel_order(order):
-    """Cancel a single order using DELETE endpoint with accountId/orderId."""
     order_id = order.get('orderId') or order.get('id')
     symbol = order.get('instrument', {}).get('symbol')
     cancel_url = f"{BASE_URL}/trading/{account_id}/order/{order_id}"
@@ -360,7 +357,6 @@ def client_cancel_order(order):
                 return False
 
 def ensure_no_open_orders(symbol):
-    """Ensure no non-final orders exist for a symbol before placing new orders."""
     print(f"Checking for open orders for {symbol} before placing new order...")
     logging.info(f"Checking for open orders for {symbol}")
     all_orders = client_list_all_orders()
@@ -393,7 +389,6 @@ def ensure_no_open_orders(symbol):
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
 def fetch_token_and_account():
-    """Fetch new access token and brokerage account ID using YOUR_SECRET_KEY."""
     global access_token, account_id, HEADERS, last_token_fetch_time
     try:
         resp = requests.post(
@@ -433,7 +428,6 @@ def fetch_token_and_account():
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
 def refresh_token_if_needed():
-    """Refresh token if older than 23 hours."""
     if task_running['refresh_token_if_needed']:
         print("refresh_token_if_needed already running. Skipping.")
         return False
@@ -490,7 +484,7 @@ def client_list_positions():
         for p in pos_list:
             sym = p.get('instrument', {}).get('symbol')
             if sym != 'BTC':
-                continue  # Only process BTC
+                continue
             qty = float(p.get('quantity', 0))
             avg = round(float(p.get('costBasis', {}).get('unitCost', 0)), 2)
             opened_at = p.get('openedAt', datetime.now(eastern).strftime("%Y-%m-%d"))
@@ -531,7 +525,7 @@ def sync_db_with_api():
             for pos in api_positions:
                 symbol = pos['symbol']
                 if symbol != 'BTC':
-                    continue  # Only sync BTC
+                    continue
                 qty = pos['qty']
                 avg_price = pos['avg_entry_price']
                 purchase_date = pos['purchase_date']
@@ -781,24 +775,20 @@ def calculate_buy_points(symbol):
 
     previous_close = historical_data['close'].iloc[-1]
 
-    # RSI (daily)
     rsi = historical_data['rsi'].iloc[-1]
     if not np.isnan(rsi) and rsi < 30:
         points += 25
 
-    # MACD crossover
     macd = historical_data['macd']
     signal = historical_data['signal']
     if len(macd) >= 2 and not np.isnan(macd.iloc[-1]) and not np.isnan(signal.iloc[-1]) and not np.isnan(macd.iloc[-2]) and not np.isnan(signal.iloc[-2]):
         if macd.iloc[-1] > signal.iloc[-1] and macd.iloc[-2] < signal.iloc[-2]:
             points += 25
 
-    # Volume
     volume = historical_data['volume']
     if volume.iloc[-1] > volume.mean():
         points += 25
 
-    # Bollinger Bands
     lower_bb = historical_data['lower_bb'].iloc[-1]
     if not np.isnan(lower_bb) and current_price < lower_bb:
         points += 25
@@ -809,24 +799,20 @@ def calculate_buy_points(symbol):
         if current_price < atr_low:
             points += 25
 
-    # VWAP
     vwap = historical_data['vwap'].iloc[-1]
     if not np.isnan(vwap) and current_price > vwap:
         points += 25
 
-    # SMA
     sma_200 = historical_data['sma_200'].iloc[-1]
     if not np.isnan(sma_200) and current_price > sma_200:
         points += 25
 
-    # Trending momentum (ADX)
     adx = historical_data['adx'].iloc[-1]
     plus_di = historical_data['plus_di'].iloc[-1]
     minus_di = historical_data['minus_di'].iloc[-1]
     if not np.isnan(adx) and adx > 25 and not np.isnan(plus_di) and not np.isnan(minus_di) and plus_di > minus_di:
         points += 25
 
-    # Stochastic
     slowk = historical_data['slowk'].iloc[-1]
     slowd = historical_data['slowd'].iloc[-1]
     if not np.isnan(slowk) and slowk < 20:
@@ -838,7 +824,6 @@ def calculate_buy_points(symbol):
             if slowk > slowd and prev_slowk < prev_slowd:
                 points += 25
 
-    # Bullish candlestick patterns
     points += get_candlestick_points(symbol, 'buy')
 
     print(f"Buy points for {symbol}: {points}")
@@ -862,24 +847,20 @@ def calculate_sell_points(symbol):
 
     previous_close = historical_data['close'].iloc[-1]
 
-    # RSI (daily)
     rsi = historical_data['rsi'].iloc[-1]
     if not np.isnan(rsi) and rsi > 70:
         points += 25
 
-    # MACD crossover
     macd = historical_data['macd']
     signal = historical_data['signal']
     if len(macd) >= 2 and not np.isnan(macd.iloc[-1]) and not np.isnan(signal.iloc[-1]) and not np.isnan(macd.iloc[-2]) and not np.isnan(signal.iloc[-2]):
         if macd.iloc[-1] < signal.iloc[-1] and macd.iloc[-2] > signal.iloc[-2]:
             points += 25
 
-    # Volume
     volume = historical_data['volume']
     if volume.iloc[-1] > volume.mean():
         points += 25
 
-    # Bollinger Bands
     upper_bb = historical_data['upper_bb'].iloc[-1]
     if not np.isnan(upper_bb) and current_price > upper_bb:
         points += 25
@@ -890,24 +871,20 @@ def calculate_sell_points(symbol):
         if current_price > atr_high:
             points += 25
 
-    # VWAP
     vwap = historical_data['vwap'].iloc[-1]
     if not np.isnan(vwap) and current_price < vwap:
         points += 25
 
-    # SMA
     sma_200 = historical_data['sma_200'].iloc[-1]
     if not np.isnan(sma_200) and current_price < sma_200:
         points += 25
 
-    # Trending momentum (ADX)
     adx = historical_data['adx'].iloc[-1]
     plus_di = historical_data['plus_di'].iloc[-1]
     minus_di = historical_data['minus_di'].iloc[-1]
     if not np.isnan(adx) and adx > 25 and not np.isnan(plus_di) and not np.isnan(minus_di) and plus_di < minus_di:
         points += 25
 
-    # Stochastic
     slowk = historical_data['slowk'].iloc[-1]
     slowd = historical_data['slowd'].iloc[-1]
     if not np.isnan(slowk) and slowk > 80:
@@ -919,7 +896,6 @@ def calculate_sell_points(symbol):
             if slowk < slowd and prev_slowk > prev_slowd:
                 points += 25
 
-    # Bearish candlestick patterns
     points += get_candlestick_points(symbol, 'sell')
 
     print(f"Sell points for {symbol}: {points}")
@@ -1037,11 +1013,9 @@ def get_symbols_to_buy():
     return ['BTC']
 
 def monitor_stop_losses():
-    # Disabled for crypto
     pass
 
 def check_stop_order_status():
-    # Disabled for crypto
     pass
 
 def poll_order_status(order_id, timeout=300):
@@ -1112,9 +1086,9 @@ def buy_cryptos(symbols_to_sell_dict):
         buying_power = float(acc['buying_power_cash'])
         print(f"Total account equity: ${total_equity:.2f}, Buying power: ${buying_power:.2f}")
         logging.info(f"Total account equity: ${total_equity:.2f}, Buying power: ${buying_power:.2f}")
-        if buying_power < 10.00:
-            print("Buying power < $10.00. Skipping all buys to maintain minimum balance.")
-            logging.info("Buying power < $10.00. Skipping all buys to maintain minimum balance.")
+        if buying_power <= 10.00:  # Ensure at least $10 remains
+            print("Buying power <= $10.00. Skipping all buys to maintain minimum balance.")
+            logging.info("Buying power <= $10.00. Skipping all buys to maintain minimum balance.")
             return
         positions = client_list_positions()
         current_exposure = sum(float(p['qty'] * (rate_limited_get_quote(p['symbol']) or p['avg_entry_price'])) for p in positions)
@@ -1133,7 +1107,7 @@ def buy_cryptos(symbols_to_sell_dict):
             return
         data = rate_limited_fetch_ohlcv(sym, '1d', 200)
         df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        if df.empty or len(df) < 20:  # At least for BB timeperiod=20
+        if df.empty or len(df) < 20:
             print(f"Insufficient historical data for {sym} (daily rows: {len(df)}). Skipping.")
             logging.info(f"Insufficient historical data for {sym} (daily rows: {len(df)}). Skipping")
             return
@@ -1165,26 +1139,27 @@ def buy_cryptos(symbols_to_sell_dict):
             buying_power = float(acc['buying_power_cash'])
             print(f"Current buying power before buying {sym}: ${buying_power:.2f}")
             logging.info(f"Current buying power before buying {sym}: ${buying_power:.2f}")
-            if buying_power < 10.00:
-                print(f"Buying power < $10.00. Stopping buy orders.")
-                logging.info(f"Buying power < $10.00. Stopping buy orders.")
+            if buying_power <= 10.00:
+                print(f"Buying power <= $10.00. Stopping buy orders.")
+                logging.info(f"Buying power <= $10.00. Stopping buy orders.")
                 return
             dollar_amount = allocation_per_risk.get(risk_levels.get(sym, "ultra-low"), 10.0)
             if ALL_BUY_ORDERS_ARE_5_DOLLARS:
                 dollar_amount = 5.00
-            if dollar_amount > buying_power - 5.00:
-                dollar_amount = max(buying_power - 5.00, 0.0)
+            # Ensure we leave at least $10 in buying power
+            dollar_amount = min(dollar_amount, buying_power - 10.00)
             if dollar_amount < 1.00:
-                print(f"Insufficient buying power for {sym}. Stopping.")
-                logging.info(f"Insufficient buying power for {sym}. Stopping.")
+                print(f"Insufficient buying power for {sym} after reserving $10. Stopping.")
+                logging.info(f"Insufficient buying power for {sym} after reserving $10. Stopping.")
                 return
             qty = dollar_amount / current_price if current_price else 0
+            qty = round(qty, 5)  # Round to 5 decimal places
             if qty <= 0:
                 print(f"Invalid quantity for {sym}. Skipping.")
                 logging.info(f"Invalid quantity for {sym}. Skipping.")
                 return
-            print(f"Attempting to buy ${dollar_amount:.2f} ({qty:.4f} of {sym})...")
-            logging.info(f"Attempting to buy ${dollar_amount:.2f} ({qty:.4f} of {sym})")
+            print(f"Attempting to buy ${dollar_amount:.2f} ({qty:.5f} of {sym})...")
+            logging.info(f"Attempting to buy ${dollar_amount:.2f} ({qty:.5f} of {sym})")
             order_id = client_place_order(sym, "BUY", amount=dollar_amount)
             if order_id:
                 print(f"Buy order placed for ${dollar_amount:.2f} of {sym}, Order ID: {order_id}")
@@ -1227,7 +1202,7 @@ def buy_cryptos(symbols_to_sell_dict):
                             'Price Per Share': filled_price
                         })
                     send_alert(
-                        f"Bought {filled_qty:.4f} of {sym} at ${filled_price:.2f}",
+                        f"Bought {filled_qty:.5f} of {sym} at ${filled_price:.2f}",
                         subject=f"Trade Executed: Bought {sym}"
                     )
                     acc = client_get_account()
@@ -1292,8 +1267,9 @@ def sell_cryptos():
                         print(f"Cannot sell {sym}: Open orders exist.")
                         logging.info(f"Cannot sell {sym}: Open orders exist")
                         continue
-                    sell_qty = round(pos.quantity, 5) if FRACTIONAL_BUY_ORDERS else int(pos.quantity)
-                    if sell_qty == 0:
+                    # Ensure sell quantity doesn't exceed owned quantity, rounded to 5 decimal places
+                    sell_qty = min(round(pos.quantity, 5), pos.quantity) if FRACTIONAL_BUY_ORDERS else int(pos.quantity)
+                    if sell_qty <= 0:
                         print(f"Skipped sell for {sym}: Quantity {sell_qty} is zero.")
                         logging.info(f"Skipped sell for {sym}: Quantity {sell_qty} is zero")
                         continue
@@ -1350,6 +1326,7 @@ def sell_cryptos():
                             if e.response.status_code == 400:
                                 print(f"HTTP 400 error on attempt {attempt + 1} for {sym}: {e.response.text}")
                                 logging.error(f"HTTP 400 error for {sym}: {e.response.text}")
+                                # Adjust quantity to exact owned amount
                                 adjusted_qty = round(pos.quantity, 5)
                                 print(f"Retrying with adjusted quantity: {adjusted_qty:.5f}")
                                 logging.info(f"Retrying with adjusted quantity: {adjusted_qty:.5f}")
