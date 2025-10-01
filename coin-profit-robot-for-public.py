@@ -4,8 +4,7 @@ import csv
 import logging
 import threading
 from uuid import uuid4
-from datetime import datetime, timedelta, date, timezone
-from datetime import time as time2
+from datetime import datetime, timedelta, timezone
 import pytz
 import requests
 import urllib.parse
@@ -17,12 +16,11 @@ import numpy as np
 from sqlalchemy import create_engine, Column, Integer, String, Float, text
 from sqlalchemy.orm import sessionmaker, scoped_session, declarative_base
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm.exc import NoResultFound
 from requests.exceptions import HTTPError, ConnectionError, Timeout
 from ratelimit import limits, sleep_and_retry
 import traceback
 
-# ANSI color codes for terminal output
+# ANSI color codes
 GREEN = "\033[92m"
 RED = "\033[91m"
 YELLOW = "\033[93m"
@@ -37,9 +35,9 @@ PRINT_DATABASE = True
 DEBUG = False
 ALL_BUY_ORDERS_ARE_5_DOLLARS = False
 FRACTIONAL_BUY_ORDERS = True
+ENABLE_AUTOMATIC_STOP_LOSS_ORDERS = False
+STOP_LOSS_PERCENTAGE = 0.05
 POINT_THRESHOLD = 100
-ENABLE_AUTOMATIC_STOP_LOSS_ORDERS = False  # Global variable to enable/disable stop-loss orders
-STOP_LOSS_PERCENTAGE = 0.05  # Configurable stop-loss percentage (5% below avg price)
 
 # Global variables
 YOUR_SECRET_KEY = os.getenv("YOUR_SECRET_KEY")
@@ -51,12 +49,8 @@ account_id = None
 last_token_fetch_time = None
 BASE_URL = "https://api.public.com/userapigateway"
 HEADERS = None
-risk_levels = {
-    "BTC": "ultra-low"
-}
-allocation_per_risk = {
-    "ultra-low": 10.0
-}
+risk_levels = {"BTC": "ultra-low"}
+allocation_per_risk = {"ultra-low": 10.0}
 symbols_to_sell_dict = {}
 today_date = datetime.today().date()
 today_datetime = datetime.now(pytz.timezone('US/Eastern'))
@@ -69,13 +63,8 @@ qty = 0
 price_history = {}
 last_stored = {}
 interval_map = {
-    '1min': 60,
-    '5min': 300,
-    '10min': 600,
-    '15min': 900,
-    '30min': 1800,
-    '45min': 2700,
-    '60min': 3600
+    '1min': 60, '5min': 300, '10min': 600, '15min': 900,
+    '30min': 1800, '45min': 2700, '60min': 3600
 }
 crypto_data = {}
 previous_prices = {}
@@ -85,25 +74,21 @@ CALLS = 10
 PERIOD = 1
 RETRY_COUNT = 3
 task_running = {
-    'buy_cryptos': False,
-    'sell_cryptos': False,
-    'check_price_moves': False,
-    'check_stop_order_status': False,
-    'monitor_stop_losses': False,
-    'sync_db_with_api': False,
-    'refresh_token_if_needed': False,
-    'update_stop_losses': False
+    'buy_cryptos': False, 'sell_cryptos': False, 'check_price_moves': False,
+    'check_stop_order_status': False, 'monitor_stop_losses': False,
+    'sync_db_with_api': False, 'refresh_token_if_needed': False
 }
 db_lock = threading.Lock()
-
-# Timezone
 eastern = pytz.timezone('US/Eastern')
 
 # Logging configuration
-logging.basicConfig(filename='trading-bot-program-logging-messages-btc.txt', level=logging.INFO, 
-                    format='%(asctime)s %(levelname)s:%(message)s')
+logging.basicConfig(
+    filename='trading-bot-program-logging-messages-btc.txt',
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s:%(message)s'
+)
 
-# Initialize CSV file
+# Initialize CSV
 def initialize_csv():
     with open(csv_filename, mode='w', newline='') as csv_file:
         csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
@@ -130,7 +115,7 @@ class Position(Base):
     stop_order_id = Column(String, nullable=True)
     stop_price = Column(Float, nullable=True)
 
-# Initialize SQLAlchemy
+# Initialize Database
 def initialize_database():
     engine = create_engine('sqlite:///trading_bot_btc.db', connect_args={"check_same_thread": False})
     with engine.connect() as conn:
@@ -141,7 +126,6 @@ def initialize_database():
 
 SessionLocal = initialize_database()
 
-# Rate limiting decorator
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
 def get_cached_data(symbols, data_type, fetch_func, *args, **kwargs):
@@ -167,7 +151,7 @@ def cleanup_invalid_positions():
         for pos in invalid_positions:
             print(f"Deleting invalid position for {pos.symbols} with avg_price ${pos.avg_price:.2f}")
             logging.info(f"Deleting invalid position for {pos.symbols} with avg_price ${pos.avg_price:.2f}")
-            if pos.stop_order_id and ENABLE_AUTOMATIC_STOP_LOSS_ORDERS:
+            if pos.stop_order_id:
                 client_cancel_order({'orderId': pos.stop_order_id, 'instrument': {'symbol': pos.symbols}})
             session.delete(pos)
         session.commit()
@@ -204,7 +188,6 @@ def _fetch_current_price_ccxt(symbol):
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
 def place_market_order(symbol, side, fractional=False, amount=None, quantity=None):
-    """Place MARKET order (fractional or full-share)"""
     url = f"{BASE_URL}/trading/{account_id}/order"
     order_id = str(uuid4())
     is_fractional = fractional or (amount is not None) or (quantity is not None and quantity % 1 != 0)
@@ -244,44 +227,7 @@ def place_market_order(symbol, side, fractional=False, amount=None, quantity=Non
 
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
-def place_stop_order(symbol, quantity, stop_price):
-    """Place STOP order for crypto"""
-    if not ENABLE_AUTOMATIC_STOP_LOSS_ORDERS:
-        print(f"Stop-loss orders disabled for {symbol}. Skipping stop order placement.")
-        logging.info(f"Stop-loss orders disabled for {symbol}. Skipping stop order placement.")
-        return {"error": "Stop-loss orders disabled"}
-    url = f"{BASE_URL}/trading/{account_id}/order"
-    order_id = str(uuid4())
-    expiration = {"timeInForce": "GTD", "expirationTime": get_expiration()}
-    payload = {
-        "orderId": order_id,
-        "instrument": {"symbol": symbol, "type": "CRYPTO"},
-        "orderSide": "SELL",
-        "orderType": "STOP",
-        "stopPrice": f"{stop_price:.2f}",
-        "quantity": f"{quantity:.5f}",
-        "expiration": expiration,
-        "openCloseIndicator": "OPEN"
-    }
-    try:
-        response = requests.post(url, headers=HEADERS, json=payload, timeout=10)
-        if response.status_code >= 400:
-            print(f"HTTP Error Response for stop order {symbol}: {response.status_code} {response.text}")
-            logging.error(f"HTTP Error Response for stop order {symbol}: {response.status_code} {response.text}")
-            return {"error": f"HTTP {response.status_code}: {response.text}"}
-        response.raise_for_status()
-        order_data = response.json()
-        logging.info(f"Stop order placed for {quantity:.5f} of {symbol} at ${stop_price:.2f}: {order_data}")
-        print(f"Stop order placed for {quantity:.5f} of {symbol} at ${stop_price:.2f}")
-        return order_data
-    except Exception as e:
-        print(f"Error placing stop order for {symbol}: {e}")
-        logging.error(f"Error placing stop order for {symbol}: {e}")
-        return {"error": str(e)}
-
-@sleep_and_retry
-@limits(calls=CALLS, period=PERIOD)
-def client_place_order(symbol, side, amount=None, quantity=None, order_type="MARKET", stop_price=None):
+def client_place_order(symbol, side, amount=None, quantity=None, order_type="MARKET", limit_price=None, stop_price=None):
     try:
         if not account_id:
             logging.error("No BROKERAGE accountId")
@@ -294,18 +240,8 @@ def client_place_order(symbol, side, amount=None, quantity=None, order_type="MAR
                 amount=amount,
                 quantity=quantity
             )
-        elif order_type == "STOP":
-            if stop_price is None or quantity is None:
-                logging.error(f"Stop order for {symbol} requires stop_price and quantity")
-                return None
-            order_response = place_stop_order(
-                symbol=symbol,
-                quantity=quantity,
-                stop_price=stop_price
-            )
         else:
-            logging.error(f"Unsupported order type for {symbol}: {order_type}")
-            return None
+            order_response = place_stop_order(symbol, side, quantity, stop_price)
         if order_response.get('error'):
             logging.error(f"Order placement error for {symbol}: {order_response['error']}")
             return None
@@ -319,8 +255,34 @@ def client_place_order(symbol, side, amount=None, quantity=None, order_type="MAR
         logging.error(f"Order placement error for {symbol}: {e}")
         return None
 
+@sleep_and_retry
+@limits(calls=CALLS, period=PERIOD)
+def place_stop_order(symbol, side, quantity, stop_price):
+    url = f"{BASE_URL}/trading/{account_id}/order"
+    order_id = str(uuid4())
+    expiration = {"timeInForce": "GTD", "expirationTime": get_expiration()}
+    payload = {
+        "orderId": order_id,
+        "instrument": {"symbol": symbol, "type": "CRYPTO"},
+        "orderSide": side.upper(),
+        "orderType": "STOP",
+        "stopPrice": f"{stop_price:.2f}",
+        "quantity": f"{quantity:.5f}",
+        "expiration": expiration,
+        "openCloseIndicator": "OPEN"
+    }
+    try:
+        response = requests.post(url, headers=HEADERS, json=payload, timeout=10)
+        response.raise_for_status()
+        logging.info(f"Stop order placed successfully for {symbol}: {response.json()}")
+        return response.json()
+    except Exception as e:
+        print(f"ERROR placing stop order for {symbol}:")
+        logging.error(f"Error placing stop order for {symbol}: {e}")
+        traceback.print_exc()
+        return {"error": str(e)}
+
 def get_expiration():
-    """Return expirationTime string for GTD orders (full-share), skip weekends"""
     exp = datetime.now(timezone.utc) + timedelta(days=30)
     if exp.weekday() == 5:
         exp += timedelta(days=2)
@@ -366,10 +328,6 @@ def client_list_all_orders():
         resp.raise_for_status()
         data = resp.json()
         all_orders = data.get('orders', [])
-        print(f"Retrieved {len(all_orders)} total orders.")
-        for i, o in enumerate(all_orders, 1):
-            print(f"\n--- Order {i} ---")
-            print(json.dumps(o, indent=2))
         return all_orders
     except Exception as e:
         logging.error(f"Error listing orders: {e}")
@@ -385,28 +343,21 @@ def client_cancel_order(order):
         try:
             resp = requests.delete(cancel_url, headers=HEADERS, timeout=10)
             resp.raise_for_status()
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Cancelled order {order_id} ({symbol})")
-            if resp.content:
-                try:
-                    print("  Response:", json.dumps(resp.json(), indent=2))
-                except Exception:
-                    print("  Response text:", resp.text)
+            print(f"Cancelled order {order_id} ({symbol})")
+            logging.info(f"Cancelled order {order_id} ({symbol})")
             return True
         except Exception as e:
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Attempt {attempt} failed to cancel order {order_id} ({symbol}): {e}")
-            if hasattr(e, 'response') and e.response is not None:
-                try:
-                    print("  Response:", e.response.json())
-                except:
-                    print("  Response text:", e.response.text)
+            print(f"Attempt {attempt} failed to cancel order {order_id} ({symbol}): {e}")
+            logging.error(f"Attempt {attempt} failed to cancel order {order_id} ({symbol}): {e}")
             if attempt < RETRY_COUNT:
                 time.sleep(2)
             else:
                 print(f"Giving up on order {order_id} after {RETRY_COUNT} attempts.")
+                logging.error(f"Giving up on order {order_id} after {RETRY_COUNT} attempts")
                 return False
 
 def ensure_no_open_orders(symbol):
-    print(f"Checking for open orders for {symbol} before placing new order...")
+    print(f"Checking for open orders for {symbol}...")
     logging.info(f"Checking for open orders for {symbol}")
     all_orders = client_list_all_orders()
     open_orders = [o for o in all_orders if o.get('instrument', {}).get('symbol') == symbol and o.get('status') not in ['FILLED', 'CANCELLED', 'REJECTED']]
@@ -414,7 +365,7 @@ def ensure_no_open_orders(symbol):
         print(f"No open orders found for {symbol}.")
         logging.info(f"No open orders found for {symbol}")
         return True
-    print(f"Found {len(open_orders)} open orders for {symbol}. Initiating cancellation process...")
+    print(f"Found {len(open_orders)} open orders for {symbol}. Cancelling...")
     logging.info(f"Found {len(open_orders)} open orders for {symbol}")
     for order in open_orders:
         if client_cancel_order(order):
@@ -428,8 +379,8 @@ def ensure_no_open_orders(symbol):
     all_orders = client_list_all_orders()
     open_orders = [o for o in all_orders if o.get('instrument', {}).get('symbol') == symbol and o.get('status') not in ['FILLED', 'CANCELLED', 'REJECTED']]
     if open_orders:
-        print(f"Warning: Still {len(open_orders)} open orders for {symbol} after final check.")
-        logging.warning(f"Still {len(open_orders)} open orders for {symbol} after final check")
+        print(f"Warning: Still {len(open_orders)} open orders for {symbol}.")
+        logging.warning(f"Still {len(open_orders)} open orders for {symbol}")
         return False
     print(f"Confirmed: No open orders for {symbol}.")
     logging.info(f"Confirmed: No open orders for {symbol}")
@@ -446,7 +397,6 @@ def fetch_token_and_account():
             json={"secret": YOUR_SECRET_KEY, "validityInMinutes": 1440},
             timeout=10
         )
-        print("Token endpoint response:", resp.status_code, resp.text)
         resp.raise_for_status()
         access_token = resp.json().get("accessToken")
         if not access_token:
@@ -456,7 +406,6 @@ def fetch_token_and_account():
             headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
             timeout=10
         )
-        print("Account endpoint response:", resp.status_code, resp.text)
         resp.raise_for_status()
         accounts = resp.json().get("accounts", [])
         brokerage = next((a for a in accounts if a.get("accountType") == "BROKERAGE"), None)
@@ -469,8 +418,8 @@ def fetch_token_and_account():
         logging.info(f"Access token and brokerage account fetched: {account_id}")
         return True
     except Exception as e:
-        print("Error fetching token/account:", e)
-        logging.error("Error fetching token/account:")
+        print(f"Error fetching token/account: {e}")
+        logging.error(f"Error fetching token/account: {e}")
         traceback.print_exc()
         return False
 
@@ -525,9 +474,12 @@ def client_list_positions():
         if not account_id:
             logging.error("No BROKERAGE accountId")
             return []
-        resp = requests.get(f"{BASE_URL}/trading/{account_id}/portfolio/v2", headers=HEADERS, timeout=10)
+        url = f"{BASE_URL}/trading/{account_id}/portfolio/v2"
+        resp = requests.get(url, headers=HEADERS, timeout=10)
+        print(f"Raw API response for positions: {resp.status_code} {resp.text}")
+        logging.info(f"Raw API response for positions: {resp.status_code} {resp.text}")
         resp.raise_for_status()
-        data = resp.json()
+        data = resp.json() or {}
         pos_list = data.get('positions', [])
         out = []
         for p in pos_list:
@@ -567,26 +519,31 @@ def client_list_positions():
 def sync_db_with_api():
     if task_running['sync_db_with_api']:
         print("sync_db_with_api already running. Skipping.")
+        logging.info("sync_db_with_api already running. Skipping")
         return
     task_running['sync_db_with_api'] = True
     try:
         session = SessionLocal()
         try:
+            api_positions = []
             for attempt in range(3):
                 try:
                     api_positions = client_list_positions()
+                    print(f"API positions retrieved: {api_positions}")
+                    logging.info(f"API positions retrieved: {api_positions}")
                     break
                 except Exception as e:
-                    logging.error(f"Retry {attempt + 1}/3: Error syncing DB with API: {e}")
+                    logging.error(f"Retry {attempt + 1}/3: Error fetching positions from API: {e}")
+                    print(f"Retry {attempt + 1}/3: Error fetching positions from API: {e}")
                     time.sleep(2 ** attempt)
                     if attempt == 2:
-                        logging.error("All retries failed for syncing DB with API.")
+                        logging.error("All retries failed for syncing DB with API. Using database positions.")
+                        print("All retries failed for syncing DB with API. Using database positions.")
                         return
             api_symbols = {pos['symbol'] for pos in api_positions}
-            positions_to_delete = []
             for pos in api_positions:
                 symbol = pos['symbol']
-                if pos['instrument_type'] != 'CRYPTO':
+                if symbol != 'BTC':
                     continue
                 qty = pos['qty']
                 avg_price = pos['avg_entry_price']
@@ -595,37 +552,27 @@ def sync_db_with_api():
                 if db_pos:
                     db_pos.quantity = qty
                     db_pos.avg_price = avg_price
-                    if ENABLE_AUTOMATIC_STOP_LOSS_ORDERS and not db_pos.stop_order_id and qty > 0:
-                        stop_price = avg_price * (1 - STOP_LOSS_PERCENTAGE)
-                        order_id = client_place_order(symbol, "SELL", quantity=qty, order_type="STOP", stop_price=stop_price)
-                        if order_id:
-                            db_pos.stop_order_id = order_id
-                            db_pos.stop_price = stop_price
+                    db_pos.purchase_date = purchase_date
                 else:
-                    stop_price = avg_price * (1 - STOP_LOSS_PERCENTAGE) if ENABLE_AUTOMATIC_STOP_LOSS_ORDERS else None
-                    order_id = client_place_order(symbol, "SELL", quantity=qty, order_type="STOP", stop_price=stop_price) if ENABLE_AUTOMATIC_STOP_LOSS_ORDERS and qty > 0 else None
                     db_pos = Position(
                         symbols=symbol,
                         quantity=qty,
                         avg_price=avg_price,
-                        purchase_date=purchase_date,
-                        stop_order_id=order_id,
-                        stop_price=stop_price if order_id else None
+                        purchase_date=purchase_date
                     )
                     session.add(db_pos)
-            for db_pos in session.query(Position).all():
-                if db_pos.symbols not in api_symbols and db_pos.quantity <= 0:
-                    positions_to_delete.append(db_pos)
-            time.sleep(5)
-            for db_pos in positions_to_delete:
-                if db_pos.stop_order_id and ENABLE_AUTOMATIC_STOP_LOSS_ORDERS:
-                    client_cancel_order({'orderId': db_pos.stop_order_id, 'instrument': {'symbol': db_pos.symbols}})
-                session.delete(db_pos)
+            for db_pos in session.query(Position).filter(Position.quantity <= 0).all():
+                if db_pos.symbols not in api_symbols:
+                    if db_pos.stop_order_id:
+                        client_cancel_order({'orderId': db_pos.stop_order_id, 'instrument': {'symbol': db_pos.symbols}})
+                    session.delete(db_pos)
             session.commit()
             print("Database synced with API for CRYPTO positions.")
+            logging.info("Database synced with API for CRYPTO positions")
         except Exception as e:
             session.rollback()
             logging.error(f"Error syncing DB with API: {e}")
+            print(f"Error syncing DB with API: {e}")
         finally:
             session.close()
     finally:
@@ -633,25 +580,28 @@ def sync_db_with_api():
 
 def load_positions_from_database():
     print("Loading CRYPTO positions from database...")
+    logging.info("Loading CRYPTO positions from database")
     with db_lock:
         session = SessionLocal()
         try:
-            positions = session.query(Position).filter(Position.symbols == 'BTC').all()
+            positions = session.query(Position).filter(Position.quantity > 0, Position.symbols == 'BTC').all()
             symbols_to_sell_dict = {}
             for position in positions:
-                symbols_to_sell = position.symbols
-                avg_price = position.avg_price
-                purchase_date = position.purchase_date
-                symbols_to_sell_dict[symbols_to_sell] = (avg_price, purchase_date)
+                symbols_to_sell_dict[position.symbols] = (position.avg_price, position.purchase_date)
             print(f"Loaded {len(symbols_to_sell_dict)} CRYPTO positions from database.")
+            logging.info(f"Loaded {len(symbols_to_sell_dict)} CRYPTO positions from database")
             return symbols_to_sell_dict
+        except Exception as e:
+            logging.error(f"Error loading positions from database: {e}")
+            print(f"Error loading positions from database: {e}")
+            return {}
         finally:
             session.close()
 
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
 def calculate_technical_indicators(symbol, lookback_days=200):
-    print(f"Calculating technical indicators for {symbol} using ccxt...")
+    print(f"Calculating technical indicators for {symbol}...")
     logging.info(f"Calculating technical indicators for {symbol}")
     exchange = ccxt.coinbase()
     symbol_usd = f"{symbol}/USD"
@@ -662,26 +612,20 @@ def calculate_technical_indicators(symbol, lookback_days=200):
         historical_data.set_index('timestamp', inplace=True)
         if historical_data.empty or len(historical_data) < lookback_days:
             logging.error(f"Insufficient data for {symbol} (rows: {len(historical_data)})")
-            print(f"Insufficient data for {symbol} (rows: {len(historical_data)}).")
             return None
         historical_data = historical_data.dropna(subset=['open', 'high', 'low', 'close'])
         if len(historical_data) < 35:
             logging.error(f"After cleaning, insufficient data for {symbol} (rows: {len(historical_data)})")
-            print(f"After cleaning, insufficient data for {symbol} (rows: {len(historical_data)}).")
             return None
         short_window = 12
         long_window = 26
         signal_window = 9
         try:
-            macd, signal, _ = talib.MACD(historical_data['close'].values,
-                                         fastperiod=short_window,
-                                         slowperiod=long_window,
-                                         signalperiod=signal_window)
+            macd, signal, _ = talib.MACD(historical_data['close'].values, fastperiod=short_window, slowperiod=long_window, signalperiod=signal_window)
             historical_data['macd'] = macd
             historical_data['signal'] = signal
         except Exception as e:
             print(f"Error calculating MACD for {symbol}: {e}")
-            logging.error(f"Error calculating MACD for {symbol}: {e}")
             historical_data['macd'] = np.nan
             historical_data['signal'] = np.nan
         try:
@@ -689,7 +633,6 @@ def calculate_technical_indicators(symbol, lookback_days=200):
             historical_data['rsi'] = rsi
         except Exception as e:
             print(f"Error calculating RSI for {symbol}: {e}")
-            logging.error(f"Error calculating RSI for {symbol}: {e}")
             historical_data['rsi'] = np.nan
         try:
             upper, middle, lower = talib.BBANDS(historical_data['close'].values, timeperiod=20, nbdevup=2, nbdevdn=2)
@@ -698,7 +641,6 @@ def calculate_technical_indicators(symbol, lookback_days=200):
             historical_data['lower_bb'] = lower
         except Exception as e:
             print(f"Error calculating BB for {symbol}: {e}")
-            logging.error(f"Error calculating BB for {symbol}: {e}")
             historical_data['upper_bb'] = np.nan
             historical_data['middle_bb'] = np.nan
             historical_data['lower_bb'] = np.nan
@@ -706,14 +648,12 @@ def calculate_technical_indicators(symbol, lookback_days=200):
             historical_data['sma_200'] = talib.SMA(historical_data['close'].values, timeperiod=200)
         except Exception as e:
             print(f"Error calculating SMA for {symbol}: {e}")
-            logging.error(f"Error calculating SMA for {symbol}: {e}")
             historical_data['sma_200'] = np.nan
         try:
             historical_data['typical_price'] = (historical_data['high'] + historical_data['low'] + historical_data['close']) / 3
             historical_data['vwap'] = (historical_data['typical_price'] * historical_data['volume']).cumsum() / historical_data['volume'].cumsum()
         except Exception as e:
             print(f"Error calculating VWAP for {symbol}: {e}")
-            logging.error(f"Error calculating VWAP for {symbol}: {e}")
             historical_data['vwap'] = np.nan
         try:
             historical_data['adx'] = talib.ADX(historical_data['high'].values, historical_data['low'].values, historical_data['close'].values, timeperiod=14)
@@ -721,77 +661,41 @@ def calculate_technical_indicators(symbol, lookback_days=200):
             historical_data['minus_di'] = talib.MINUS_DI(historical_data['high'].values, historical_data['low'].values, historical_data['close'].values, timeperiod=14)
         except Exception as e:
             print(f"Error calculating ADX for {symbol}: {e}")
-            logging.error(f"Error calculating ADX for {symbol}: {e}")
             historical_data['adx'] = np.nan
             historical_data['plus_di'] = np.nan
             historical_data['minus_di'] = np.nan
-        try:
-            slowk, slowd = talib.STOCH(historical_data['high'].values, historical_data['low'].values, historical_data['close'].values, fastk_period=14, slowk_period=3, slowd_period=3)
-            historical_data['slowk'] = slowk
-            historical_data['slowd'] = slowd
-        except Exception as e:
-            print(f"Error calculating Stochastic for {symbol}: {e}")
-            logging.error(f"Error calculating Stochastic for {symbol}: {e}")
-            historical_data['slowk'] = np.nan
-            historical_data['slowd'] = np.nan
-        historical_data['volume'] = historical_data['volume']
         print(f"Technical indicators calculated for {symbol}.")
         logging.info(f"Technical indicators calculated for {symbol}")
-        print_technical_indicators(symbol, historical_data)
         return historical_data
     except Exception as e:
         logging.error(f"Error fetching OHLCV for {symbol}: {e}")
-        print(f"Error fetching OHLCV for {symbol}: {e}")
         return None
 
-def print_technical_indicators(symbol, historical_data):
-    print(f"\nTechnical Indicators for {symbol}:\n")
-    tail_data = historical_data[['close', 'macd', 'signal', 'rsi', 'upper_bb', 'middle_bb', 'lower_bb', 'sma_200', 'vwap', 'adx', 'plus_di', 'minus_di', 'volume', 'slowk', 'slowd']].tail()
-    for idx, row in tail_data.iterrows():
-        close_color = GREEN if row['close'] >= 0 else RED
-        macd_value = row['macd']
-        signal_value = row['signal']
-        if np.isnan(macd_value) or np.isnan(signal_value):
-            macd_display = "N/A"
-            signal_display = "N/A"
-            macd_color = YELLOW
-        else:
-            macd_display = f"{macd_value:.4f}"
-            signal_display = f"{signal_value:.4f}"
-            macd_color = GREEN if macd_value >= signal_value else RED
-        rsi_value = row['rsi']
-        rsi_display = f"{rsi_value:.2f}" if not np.isnan(rsi_value) else "50.00"
-        upper_bb = row['upper_bb']
-        middle_bb = row['middle_bb']
-        lower_bb = row['lower_bb']
-        upper_display = f"{upper_bb:.4f}" if not np.isnan(upper_bb) else "N/A"
-        middle_display = f"{middle_bb:.4f}" if not np.isnan(middle_bb) else "N/A"
-        lower_display = f"{lower_bb:.4f}" if not np.isnan(lower_bb) else "N/A"
-        sma_200 = row['sma_200']
-        sma_display = f"{sma_200:.4f}" if not np.isnan(sma_200) else "N/A"
-        vwap = row['vwap']
-        vwap_display = f"{vwap:.4f}" if not np.isnan(vwap) else "N/A"
-        adx = row['adx']
-        plus_di = row['plus_di']
-        minus_di = row['minus_di']
-        adx_display = f"{adx:.2f}" if not np.isnan(adx) else "N/A"
-        plus_di_display = f"{plus_di:.2f}" if not np.isnan(plus_di) else "N/A"
-        minus_di_display = f"{minus_di:.2f}" if not np.isnan(minus_di) else "N/A"
-        slowk = row['slowk']
-        slowd = row['slowd']
-        slowk_display = f"{slowk:.2f}" if not np.isnan(slowk) else "N/A"
-        slowd_display = f"{slowd:.2f}" if not np.isnan(slowd) else "N/A"
-        print(f"Time: {idx} | Close: {close_color}${row['close']:.2f}{RESET} | "
-              f"MACD: {macd_color}{macd_display}{RESET} (Signal: {signal_display}) | "
-              f"RSI: {rsi_display} | Upper BB: {upper_display} | Middle BB: {middle_display} | Lower BB: {lower_display} | "
-              f"SMA200: {sma_display} | VWAP: {vwap_display} | ADX: {adx_display} | +DI: {plus_di_display} | -DI: {minus_di_display} | Volume: {row['volume']:.0f} | "
-              f"SlowK: {slowk_display} | SlowD: {slowd_display}")
-    print("")
+@sleep_and_retry
+@limits(calls=CALLS, period=PERIOD)
+def get_daily_rsi(symbol):
+    print(f"Calculating daily RSI for {symbol}...")
+    logging.info(f"Calculating daily RSI for {symbol}")
+    exchange = ccxt.coinbase()
+    symbol_usd = f"{symbol}/USD"
+    try:
+        data = exchange.fetch_ohlcv(symbol_usd, timeframe='1d', limit=30)
+        historical_data = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        if historical_data.empty or len(historical_data['close']) < 14:
+            print(f"Insufficient daily data for {symbol} (rows: {len(historical_data)}).")
+            return 50.00
+        rsi = talib.RSI(historical_data['close'], timeperiod=14)[-1]
+        rsi_value = round(rsi, 2) if not np.isnan(rsi) else 50.00
+        print(f"Daily RSI for {symbol}: {rsi_value}")
+        return rsi_value
+    except Exception as e:
+        print(f"Error calculating daily RSI for {symbol}: {e}")
+        return 50.00
 
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
 def get_average_true_range(symbol):
-    print(f"Calculating ATR for {symbol} using ccxt...")
+    print(f"Calculating ATR for {symbol}...")
     logging.info(f"Calculating ATR for {symbol}")
     def _fetch_atr(symbol):
         exchange = ccxt.coinbase()
@@ -802,11 +706,9 @@ def get_average_true_range(symbol):
             atr = talib.ATR(df['high'].values, df['low'].values, df['close'].values, timeperiod=22)
             atr_value = atr[-1]
             print(f"ATR value for {symbol}: {atr_value:.4f}")
-            logging.info(f"ATR value for {symbol}: {atr_value:.4f}")
             return atr_value
         except Exception as e:
             logging.error(f"Error calculating ATR for {symbol}: {e}")
-            print(f"Error calculating ATR for {symbol}: {e}")
             return None
     return get_cached_data(symbol, 'atr', _fetch_atr, symbol)
 
@@ -823,12 +725,108 @@ def get_14_day_avg_range(symbol):
         avg_high = df['high'].mean()
         avg_low = df['low'].mean()
         print(f"14-day avg high for {symbol}: {avg_high:.4f}, avg low: {avg_low:.4f}")
-        logging.info(f"14-day avg high for {symbol}: {avg_high:.4f}, avg low: {avg_low:.4f}")
         return avg_high, avg_low
     except Exception as e:
         logging.error(f"Error calculating 14-day avg range for {symbol}: {e}")
-        print(f"Error calculating 14-day avg range for {symbol}: {e}")
         return None, None
+
+@sleep_and_retry
+@limits(calls=CALLS, period=PERIOD)
+def calculate_buy_points(symbol):
+    points = 0
+    current_price = client_get_quote(symbol)
+    if current_price is None:
+        return 0
+    avg_high, avg_low = get_14_day_avg_range(symbol)
+    if avg_low is not None and current_price <= avg_low:
+        return 100
+    historical_data = calculate_technical_indicators(symbol)
+    if historical_data is None:
+        return 0
+    rsi = historical_data['rsi'].iloc[-1]
+    if not np.isnan(rsi) and rsi < 30:
+        points += 10
+    daily_rsi = get_daily_rsi(symbol)
+    if daily_rsi < 30:
+        points += 10
+    macd = historical_data['macd']
+    signal = historical_data['signal']
+    if len(macd) >= 2 and not np.isnan(macd.iloc[-1]) and not np.isnan(signal.iloc[-1]) and not np.isnan(macd.iloc[-2]) and not np.isnan(signal.iloc[-2]):
+        if macd.iloc[-1] > signal.iloc[-1] and macd.iloc[-2] < signal.iloc[-2]:
+            points += 10
+    volume = historical_data['volume']
+    if volume.iloc[-1] > volume.mean():
+        points += 10
+    lower_bb = historical_data['lower_bb'].iloc[-1]
+    if not np.isnan(lower_bb) and current_price < lower_bb:
+        points += 10
+    atr_low = get_atr_low_price(symbol)
+    if atr_low is not None and current_price < atr_low:
+        points += 10
+    vwap = historical_data['vwap'].iloc[-1]
+    if not np.isnan(vwap) and current_price > vwap:
+        points += 10
+    sma_200 = historical_data['sma_200'].iloc[-1]
+    if not np.isnan(sma_200) and current_price > sma_200:
+        points += 10
+    adx = historical_data['adx'].iloc[-1]
+    plus_di = historical_data['plus_di'].iloc[-1]
+    minus_di = historical_data['minus_di'].iloc[-1]
+    if not np.isnan(adx) and adx > 25 and not np.isnan(plus_di) and not np.isnan(minus_di) and plus_di > minus_di:
+        points += 10
+    points += get_candlestick_points(symbol, 'buy')
+    print(f"Buy points for {symbol}: {points}")
+    logging.info(f"Buy points for {symbol}: {points}")
+    return points
+
+@sleep_and_retry
+@limits(calls=CALLS, period=PERIOD)
+def calculate_sell_points(symbol):
+    points = 0
+    current_price = client_get_quote(symbol)
+    if current_price is None:
+        return 0
+    avg_high, avg_low = get_14_day_avg_range(symbol)
+    if avg_high is not None and current_price >= avg_high:
+        return 100
+    historical_data = calculate_technical_indicators(symbol)
+    if historical_data is None:
+        return 0
+    rsi = historical_data['rsi'].iloc[-1]
+    if not np.isnan(rsi) and rsi > 70:
+        points += 10
+    daily_rsi = get_daily_rsi(symbol)
+    if daily_rsi > 70:
+        points += 10
+    macd = historical_data['macd']
+    signal = historical_data['signal']
+    if len(macd) >= 2 and not np.isnan(macd.iloc[-1]) and not np.isnan(signal.iloc[-1]) and not np.isnan(macd.iloc[-2]) and not np.isnan(signal.iloc[-2]):
+        if macd.iloc[-1] < signal.iloc[-1] and macd.iloc[-2] > signal.iloc[-2]:
+            points += 10
+    volume = historical_data['volume']
+    if volume.iloc[-1] > volume.mean():
+        points += 10
+    upper_bb = historical_data['upper_bb'].iloc[-1]
+    if not np.isnan(upper_bb) and current_price > upper_bb:
+        points += 10
+    atr_high = get_atr_high_price(symbol)
+    if atr_high is not None and current_price > atr_high:
+        points += 10
+    vwap = historical_data['vwap'].iloc[-1]
+    if not np.isnan(vwap) and current_price < vwap:
+        points += 10
+    sma_200 = historical_data['sma_200'].iloc[-1]
+    if not np.isnan(sma_200) and current_price < sma_200:
+        points += 10
+    adx = historical_data['adx'].iloc[-1]
+    plus_di = historical_data['plus_di'].iloc[-1]
+    minus_di = historical_data['minus_di'].iloc[-1]
+    if not np.isnan(adx) and adx > 25 and not np.isnan(plus_di) and not np.isnan(minus_di) and plus_di < minus_di:
+        points += 10
+    points += get_candlestick_points(symbol, 'sell')
+    print(f"Sell points for {symbol}: {points}")
+    logging.info(f"Sell points for {symbol}: {points}")
+    return points
 
 def get_candlestick_points(symbol, side):
     exchange = ccxt.coinbase()
@@ -878,154 +876,32 @@ def get_candlestick_points(symbol, side):
                 if res[-1] < 0:
                     detected = True
                     break
-        return 25 if detected else 0
+        return 10 if detected else 0
     except Exception as e:
         logging.error(f"Error in candlestick detection for {symbol}: {e}")
         return 0
 
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
-def calculate_buy_points(symbol):
-    points = 0
+def get_atr_high_price(symbol):
+    print(f"Calculating ATR high price for {symbol}...")
+    atr_value = get_average_true_range(symbol)
     current_price = client_get_quote(symbol)
-    if current_price is None:
-        return 0
-    avg_high, avg_low = get_14_day_avg_range(symbol)
-    if avg_low is not None and current_price <= avg_low:
-        return 100
-
-    historical_data = calculate_technical_indicators(symbol)
-    if historical_data is None:
-        return 0
-
-    previous_close = historical_data['close'].iloc[-1]
-
-    rsi = historical_data['rsi'].iloc[-1]
-    if not np.isnan(rsi) and rsi < 30:
-        points += 25
-
-    macd = historical_data['macd']
-    signal = historical_data['signal']
-    if len(macd) >= 2 and not np.isnan(macd.iloc[-1]) and not np.isnan(signal.iloc[-1]) and not np.isnan(macd.iloc[-2]) and not np.isnan(signal.iloc[-2]):
-        if macd.iloc[-1] > signal.iloc[-1] and macd.iloc[-2] < signal.iloc[-2]:
-            points += 25
-
-    volume = historical_data['volume']
-    if volume.iloc[-1] > volume.mean():
-        points += 25
-
-    lower_bb = historical_data['lower_bb'].iloc[-1]
-    if not np.isnan(lower_bb) and current_price < lower_bb:
-        points += 25
-
-    atr = get_average_true_range(symbol)
-    if atr is not None:
-        atr_low = previous_close - 0.10 * atr
-        if current_price < atr_low:
-            points += 25
-
-    vwap = historical_data['vwap'].iloc[-1]
-    if not np.isnan(vwap) and current_price > vwap:
-        points += 25
-
-    sma_200 = historical_data['sma_200'].iloc[-1]
-    if not np.isnan(sma_200) and current_price > sma_200:
-        points += 25
-
-    adx = historical_data['adx'].iloc[-1]
-    plus_di = historical_data['plus_di'].iloc[-1]
-    minus_di = historical_data['minus_di'].iloc[-1]
-    if not np.isnan(adx) and adx > 25 and not np.isnan(plus_di) and not np.isnan(minus_di) and plus_di > minus_di:
-        points += 25
-
-    slowk = historical_data['slowk'].iloc[-1]
-    slowd = historical_data['slowd'].iloc[-1]
-    if not np.isnan(slowk) and slowk < 20:
-        points += 25
-    if len(historical_data) >= 2:
-        prev_slowk = historical_data['slowk'].iloc[-2]
-        prev_slowd = historical_data['slowd'].iloc[-2]
-        if not np.isnan(slowk) and not np.isnan(slowd) and not np.isnan(prev_slowk) and not np.isnan(prev_slowd):
-            if slowk > slowd and prev_slowk < prev_slowd:
-                points += 25
-
-    points += get_candlestick_points(symbol, 'buy')
-
-    print(f"Buy points for {symbol}: {points}")
-    logging.info(f"Buy points for {symbol}: {points}")
-    return points
+    atr_high = round(current_price + 0.40 * atr_value, 4) if current_price and atr_value else None
+    price_color = GREEN if atr_high and atr_high >= 0 else RED
+    print(f"ATR high price for {symbol}: {price_color}${atr_high:.4f}{RESET}" if atr_high else f"Failed to calculate ATR high price for {symbol}.")
+    return atr_high
 
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
-def calculate_sell_points(symbol):
-    points = 0
+def get_atr_low_price(symbol):
+    print(f"Calculating ATR low price for {symbol}...")
+    atr_value = get_average_true_range(symbol)
     current_price = client_get_quote(symbol)
-    if current_price is None:
-        return 0
-    avg_high, avg_low = get_14_day_avg_range(symbol)
-    if avg_high is not None and current_price >= avg_high:
-        return 100
-
-    historical_data = calculate_technical_indicators(symbol)
-    if historical_data is None:
-        return 0
-
-    previous_close = historical_data['close'].iloc[-1]
-
-    rsi = historical_data['rsi'].iloc[-1]
-    if not np.isnan(rsi) and rsi > 70:
-        points += 25
-
-    macd = historical_data['macd']
-    signal = historical_data['signal']
-    if len(macd) >= 2 and not np.isnan(macd.iloc[-1]) and not np.isnan(signal.iloc[-1]) and not np.isnan(macd.iloc[-2]) and not np.isnan(signal.iloc[-2]):
-        if macd.iloc[-1] < signal.iloc[-1] and macd.iloc[-2] > signal.iloc[-2]:
-            points += 25
-
-    volume = historical_data['volume']
-    if volume.iloc[-1] > volume.mean():
-        points += 25
-
-    upper_bb = historical_data['upper_bb'].iloc[-1]
-    if not np.isnan(upper_bb) and current_price > upper_bb:
-        points += 25
-
-    atr = get_average_true_range(symbol)
-    if atr is not None:
-        atr_high = previous_close + 0.40 * atr
-        if current_price > atr_high:
-            points += 25
-
-    vwap = historical_data['vwap'].iloc[-1]
-    if not np.isnan(vwap) and current_price < vwap:
-        points += 25
-
-    sma_200 = historical_data['sma_200'].iloc[-1]
-    if not np.isnan(sma_200) and current_price < sma_200:
-        points += 25
-
-    adx = historical_data['adx'].iloc[-1]
-    plus_di = historical_data['plus_di'].iloc[-1]
-    minus_di = historical_data['minus_di'].iloc[-1]
-    if not np.isnan(adx) and adx > 25 and not np.isnan(plus_di) and not np.isnan(minus_di) and plus_di < minus_di:
-        points += 25
-
-    slowk = historical_data['slowk'].iloc[-1]
-    slowd = historical_data['slowd'].iloc[-1]
-    if not np.isnan(slowk) and slowk > 80:
-        points += 25
-    if len(historical_data) >= 2:
-        prev_slowk = historical_data['slowk'].iloc[-2]
-        prev_slowd = historical_data['slowd'].iloc[-2]
-        if not np.isnan(slowk) and not np.isnan(slowd) and not np.isnan(prev_slowk) and not np.isnan(prev_slowd):
-            if slowk < slowd and prev_slowk > prev_slowd:
-                points += 25
-
-    points += get_candlestick_points(symbol, 'sell')
-
-    print(f"Sell points for {symbol}: {points}")
-    logging.info(f"Sell points for {symbol}: {points}")
-    return points
+    atr_low = round(current_price - 0.10 * atr_value, 4) if current_price and atr_value else None
+    price_color = GREEN if atr_low and atr_low >= 0 else RED
+    print(f"ATR low price for {symbol}: {price_color}${atr_low:.4f}{RESET}" if atr_low else f"Failed to calculate ATR low price for {symbol}.")
+    return atr_low
 
 def get_previous_price(symbol):
     return previous_prices.get(symbol, client_get_quote(symbol) or 0.0)
@@ -1039,98 +915,68 @@ def track_price_changes(symbol):
     price_change = current_price - previous_price if current_price and previous_price else 0
     change_color = GREEN if price_change >= 0 else RED
     current_color = GREEN if current_price >= 0 else RED
-    previous_color = GREEN if previous_price >= 0 else RED
     price_changes[symbol] = price_changes.get(symbol, {'increased': 0, 'decreased': 0})
     if current_price > previous_price:
         price_changes[symbol]['increased'] += 1
-        print(f"{symbol} price just increased | current price: {current_color}${current_price:.2f}{RESET} (change: {change_color}${price_change:.2f}{RESET})")
-        logging.info(f"{symbol} price just increased | current price: ${current_price:.2f} (change: ${price_change:.2f})")
+        print(f"{symbol} price increased | current price: {current_color}${current_price:.2f}{RESET} (change: {change_color}${price_change:.2f}{RESET})")
     elif current_price < previous_price:
         price_changes[symbol]['decreased'] += 1
-        print(f"{symbol} price just decreased | current price: {current_color}${current_price:.2f}{RESET} (change: {change_color}${price_change:.2f}{RESET})")
-        logging.info(f"{symbol} price just decreased | current price: ${current_price:.2f} (change: ${price_change:.2f})")
+        print(f"{symbol} price decreased | current price: {current_color}${current_price:.2f}{RESET} (change: {change_color}${price_change:.2f}{RESET})")
     else:
-        print(f"{symbol} price has not changed | current price: {current_color}${current_price:.2f}{RESET}")
-        logging.info(f"{symbol} price has not changed | current price: ${current_price:.2f}")
+        print(f"{symbol} price unchanged | current price: {current_color}${current_price:.2f}{RESET}")
     update_previous_price(symbol, current_price)
 
 def check_price_moves():
     track_price_changes('BTC')
 
 def update_stop_losses():
-    if task_running['update_stop_losses']:
-        print("update_stop_losses already running. Skipping.")
+    if not ENABLE_AUTOMATIC_STOP_LOSS_ORDERS:
         return
-    task_running['update_stop_losses'] = True
+    print("Updating stop-loss orders...")
+    logging.info("Updating stop-loss orders")
+    session = SessionLocal()
     try:
-        if not ENABLE_AUTOMATIC_STOP_LOSS_ORDERS:
-            print("Stop-loss orders disabled. Skipping update_stop_losses.")
-            logging.info("Stop-loss orders disabled. Skipping update_stop_losses.")
-            return
-        session = SessionLocal()
-        try:
-            positions = session.query(Position).filter(Position.quantity > 0, Position.symbols == 'BTC').all()
-            for pos in positions:
-                symbol = pos.symbols
-                current_price = client_get_quote(symbol)
-                if not current_price or not pos.avg_price:
-                    logging.error(f"Cannot update stop-loss for {symbol}: Invalid current price or avg price")
-                    continue
-                price_increase_pct = ((current_price - pos.avg_price) / pos.avg_price * 100) if pos.avg_price > 0 else 0
-                if price_increase_pct >= 1.0:  # Price increased by 1% or more
-                    new_stop_price = current_price * (1 - STOP_LOSS_PERCENTAGE)
-                    if pos.stop_order_id:
-                        client_cancel_order({'orderId': pos.stop_order_id, 'instrument': {'symbol': symbol}})
-                        print(f"Cancelled old stop-loss order {pos.stop_order_id} for {symbol}")
-                        logging.info(f"Cancelled old stop-loss order {pos.stop_order_id} for {symbol}")
-                    new_order_id = client_place_order(symbol, "SELL", quantity=pos.quantity, order_type="STOP", stop_price=new_stop_price)
-                    if new_order_id:
-                        pos.stop_order_id = new_order_id
-                        pos.stop_price = new_stop_price
-                        session.commit()
-                        print(f"Updated stop-loss for {symbol}: New stop price ${new_stop_price:.2f}, Order ID: {new_order_id}")
-                        logging.info(f"Updated stop-loss for {symbol}: New stop price ${new_stop_price:.2f}, Order ID: {new_order_id}")
-                        send_alert(
-                            f"Updated stop-loss for {symbol}: New stop price ${new_stop_price:.2f}",
-                            subject=f"Stop-Loss Updated: {symbol}"
-                        )
-        except Exception as e:
-            session.rollback()
-            logging.error(f"Error in update_stop_losses: {e}")
-            print(f"Error in update_stop_losses: {e}")
-        finally:
-            session.close()
+        positions = session.query(Position).filter(Position.quantity > 0, Position.symbols == 'BTC').all()
+        for pos in positions:
+            sym = pos.symbols
+            current_price = client_get_quote(sym)
+            if current_price is None:
+                continue
+            new_stop_price = current_price * (1 - STOP_LOSS_PERCENTAGE)
+            if pos.stop_price and abs(new_stop_price - pos.stop_price) / pos.stop_price < 0.01:
+                continue
+            if pos.stop_order_id:
+                client_cancel_order({'orderId': pos.stop_order_id, 'instrument': {'symbol': sym}})
+            stop_order_id = client_place_order(sym, "SELL", quantity=pos.quantity, order_type="STOP", stop_price=new_stop_price)
+            if stop_order_id:
+                pos.stop_order_id = stop_order_id
+                pos.stop_price = new_stop_price
+                print(f"Updated stop-loss for {sym}: ${new_stop_price:.2f}")
+                logging.info(f"Updated stop-loss for {sym}: ${new_stop_price:.2f}")
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        logging.error(f"Error updating stop-loss orders: {e}")
+        print(f"Error updating stop-loss orders: {e}")
     finally:
-        task_running['update_stop_losses'] = False
+        session.close()
 
 def monitor_stop_losses():
-    if task_running['monitor_stop_losses']:
-        print("monitor_stop_losses already running. Skipping.")
+    if not ENABLE_AUTOMATIC_STOP_LOSS_ORDERS:
         return
-    task_running['monitor_stop_losses'] = True
+    print("Monitoring stop-loss orders...")
+    logging.info("Monitoring stop-loss orders")
+    session = SessionLocal()
     try:
-        if not ENABLE_AUTOMATIC_STOP_LOSS_ORDERS:
-            print("Stop-loss orders disabled. Skipping monitor_stop_losses.")
-            logging.info("Stop-loss orders disabled. Skipping monitor_stop_losses.")
-            return
-        session = SessionLocal()
-        positions = session.query(Position).filter(Position.quantity > 0, Position.stop_order_id != None).all()
+        positions = session.query(Position).filter(Position.stop_order_id.isnot(None), Position.symbols == 'BTC').all()
         for pos in positions:
-            symbol = pos.symbols
-            stop_order_id = pos.stop_order_id
-            stop_price = pos.stop_price
-            current_price = client_get_quote(symbol)
-            if not current_price or not stop_price:
-                logging.error(f"Cannot monitor stop-loss for {symbol}: Invalid current price or stop price")
-                continue
-            status_info = client_get_order_status(stop_order_id)
+            sym = pos.symbols
+            status_info = client_get_order_status(pos.stop_order_id)
             if status_info and status_info["status"] == "FILLED":
                 filled_qty = status_info["filled_qty"]
-                filled_price = status_info["avg_price"] or current_price
-                print(f"Stop-loss triggered for {symbol}: Sold {filled_qty:.5f} at ${filled_price:.2f}")
-                logging.info(f"Stop-loss triggered for {symbol}: Sold {filled_qty:.5f} at ${filled_price:.2f}")
+                filled_price = status_info["avg_price"] or client_get_quote(sym) or pos.avg_price
                 trade = TradeHistory(
-                    symbols=symbol,
+                    symbols=sym,
                     action='sell',
                     quantity=filled_qty,
                     price=filled_price,
@@ -1142,6 +988,12 @@ def monitor_stop_losses():
                 pos.stop_price = None
                 if pos.quantity <= 0:
                     session.delete(pos)
+                else:
+                    new_stop_price = filled_price * (1 - STOP_LOSS_PERCENTAGE)
+                    stop_order_id = client_place_order(sym, "SELL", quantity=pos.quantity, order_type="STOP", stop_price=new_stop_price)
+                    if stop_order_id:
+                        pos.stop_order_id = stop_order_id
+                        pos.stop_price = new_stop_price
                 session.commit()
                 with open(csv_filename, mode='a', newline='') as csv_file:
                     csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
@@ -1150,36 +1002,34 @@ def monitor_stop_losses():
                         'Buy': ' ',
                         'Sell': 'Sell',
                         'Quantity': filled_qty,
-                        'Symbol': symbol,
+                        'Symbol': sym,
                         'Price Per Share': filled_price
                     })
                 send_alert(
-                    f"Stop-loss triggered: Sold {filled_qty:.5f} of {symbol} at ${filled_price:.2f}",
-                    subject=f"Stop-Loss Executed: {symbol}"
+                    f"Stop-loss triggered: Sold {filled_qty:.5f} of {sym} at ${filled_price:.2f}",
+                    subject=f"Stop-Loss Executed: {sym}"
                 )
     except Exception as e:
-        logging.error(f"Error in monitor_stop_losses: {e}")
-        print(f"Error in monitor_stop_losses: {e}")
+        session.rollback()
+        logging.error(f"Error monitoring stop-loss orders: {e}")
+        print(f"Error monitoring stop-loss orders: {e}")
     finally:
         session.close()
-        task_running['monitor_stop_losses'] = False
-
-def check_stop_order_status():
-    pass  # Functionality moved to monitor_stop_losses
 
 def print_database_tables():
-    if PRINT_DATABASE:
-        session = SessionLocal()
-        try:
-            print("\nTrade History:")
-            print("Crypto | Action | Qty | Price | Date")
-            for record in session.query(TradeHistory).filter(TradeHistory.symbols == 'BTC').all():
-                print(f"{record.symbols:<6} | {record.action:<6} | {record.quantity:.5f} | ${record.price:.2f} | {record.date}")
-        except Exception as e:
-            logging.error(f"Error printing database: {e}")
-            print(f"Error printing database: {e}")
-        finally:
-            session.close()
+    if not PRINT_DATABASE:
+        return
+    session = SessionLocal()
+    try:
+        print("\nTrade History:")
+        print("Crypto | Action | Qty | Price | Date")
+        for record in session.query(TradeHistory).filter(TradeHistory.symbols == 'BTC').all():
+            print(f"{record.symbols:<6} | {record.action:<6} | {record.quantity:.5f} | ${record.price:.2f} | {record.date}")
+    except Exception as e:
+        logging.error(f"Error printing database: {e}")
+        print(f"Error printing database: {e}")
+    finally:
+        session.close()
 
 def list_crypto_positions():
     if not PRINT_DATABASE:
@@ -1187,9 +1037,8 @@ def list_crypto_positions():
     print("\nCRYPTO Positions:")
     logging.info("Listing owned CRYPTO positions")
     try:
-        sync_db_with_api()
         session = SessionLocal()
-        crypto_positions = session.query(Position).filter(Position.quantity > 0).all()
+        crypto_positions = session.query(Position).filter(Position.quantity > 0, Position.symbols == 'BTC').all()
         if not crypto_positions:
             print("None")
             logging.info("No CRYPTO positions currently owned in database.")
@@ -1588,4 +1437,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
