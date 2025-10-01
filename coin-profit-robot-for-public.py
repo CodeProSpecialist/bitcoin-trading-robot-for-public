@@ -1429,27 +1429,29 @@ def sell_cryptos():
                     logging.info(f"No valid price data for {sym}. Skipping")
                     continue
                 
-                # Get API position data for fallback
-                api_avg_price = api_pos.get('avg_entry_price', pos.avg_price)
-                api_gain_percentage = api_pos.get('gain_percentage', None)
+                # Get average price: prioritize API, fallback to database
+                api_avg_price = api_pos.get('avg_entry_price', 0)
+                db_avg_price = pos.avg_price
+                if api_avg_price > 0:
+                    avg_price = api_avg_price
+                    logging.info(f"Using API avg_price for {sym}: ${api_avg_price:.5f}")
+                elif db_avg_price > 0:
+                    avg_price = db_avg_price
+                    logging.info(f"Falling back to DB avg_price for {sym}: ${db_avg_price:.5f}")
+                else:
+                    print(f"No valid avg_price for {sym} (API: ${api_avg_price:.5f}, DB: ${db_avg_price:.5f}). Skipping.")
+                    logging.warning(f"No valid avg_price for {sym} (API: ${api_avg_price:.5f}, DB: ${db_avg_price:.5f}). Skipping")
+                    continue
                 
                 # Calculate profit percentage
-                if pos.avg_price > 0:
-                    profit_pct = ((current_price - pos.avg_price) / pos.avg_price * 100)
-                elif api_avg_price > 0:
-                    profit_pct = ((current_price - api_avg_price) / api_avg_price * 100)
-                elif api_gain_percentage is not None:
-                    profit_pct = api_gain_percentage
-                else:
-                    profit_pct = 0
-                    logging.warning(f"No valid avg_price or gain_percentage for {sym}. Using profit_pct=0.")
+                profit_pct = ((current_price - avg_price) / avg_price * 100) if avg_price > 0 else 0
                 
                 profit_color = GREEN if profit_pct >= 0 else RED
                 print(f"{sym}: Current price: {profit_color}${current_price:.5f}{RESET}, "
-                      f"Avg price: ${pos.avg_price:.5f} (API: ${api_avg_price:.5f}), "
+                      f"Avg price: ${avg_price:.5f} (API: ${api_avg_price:.5f}, DB: ${db_avg_price:.5f}), "
                       f"Profit: {profit_color}{profit_pct:.2f}%{RESET}")
-                logging.info(f"{sym}: Current price: ${current_price:.5f}, Avg price: ${pos.avg_price:.5f} "
-                             f"(API: ${api_avg_price:.5f}), Profit: {profit_pct:.2f}%")
+                logging.info(f"{sym}: Current price: ${current_price:.5f}, Avg price: ${avg_price:.5f} "
+                             f"(API: ${api_avg_price:.5f}, DB: ${db_avg_price:.5f}), Profit: {profit_pct:.2f}%")
                 
                 if profit_pct < 0.5:
                     print(f"Skipping sell for {sym}: Profit ({profit_pct:.2f}%) is less than 0.5%.")
