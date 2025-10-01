@@ -37,7 +37,7 @@ PRINT_DATABASE = True  # Set to True to view positions to sell
 DEBUG = False  # Set to False for faster execution
 ALL_BUY_ORDERS_ARE_5_DOLLARS = False  # When True, every buy order is a $5.00 fractional share market day order
 FRACTIONAL_BUY_ORDERS = True  # Enable fractional share orders
-POINT_THRESHOLD = 100  # Threshold for buy/sell action
+POINT_THRESHOLD = 50  # Threshold for buy/sell action
 
 # Global variables
 YOUR_SECRET_KEY = os.getenv("YOUR_SECRET_KEY")
@@ -489,6 +489,8 @@ def client_list_positions():
         out = []
         for p in pos_list:
             sym = p.get('instrument', {}).get('symbol')
+            if sym != 'BTC':
+                continue  # Only process BTC
             qty = float(p.get('quantity', 0))
             avg = round(float(p.get('costBasis', {}).get('unitCost', 0)), 2)
             opened_at = p.get('openedAt', datetime.now(eastern).strftime("%Y-%m-%d"))
@@ -516,7 +518,7 @@ def sync_db_with_api():
         try:
             for attempt in range(3):
                 try:
-                    api_positions = client_list_positions()  # now returns all CRYPTO
+                    api_positions = client_list_positions()
                     break
                 except Exception as e:
                     logging.error(f"Retry {attempt + 1}/3: Error syncing DB with API: {e}")
@@ -524,16 +526,15 @@ def sync_db_with_api():
                     if attempt == 2:
                         logging.error("All retries failed for syncing DB with API.")
                         return
-
             api_symbols = {pos['symbol'] for pos in api_positions}
-
-            # Insert/update CRYPTO positions
+            positions_to_delete = []
             for pos in api_positions:
                 symbol = pos['symbol']
-                qty = round(pos['qty'], 5)
+                if symbol != 'BTC':
+                    continue  # Only sync BTC
+                qty = pos['qty']
                 avg_price = pos['avg_entry_price']
                 purchase_date = pos['purchase_date']
-
                 db_pos = session.query(Position).filter_by(symbols=symbol).first()
                 if db_pos:
                     db_pos.quantity = qty
@@ -546,20 +547,19 @@ def sync_db_with_api():
                         purchase_date=purchase_date
                     )
                     session.add(db_pos)
-
-            # Clean up positions no longer in API or dust
             for db_pos in session.query(Position).all():
-                if db_pos.symbols not in api_symbols or db_pos.quantity <= 0.00001:
-                    if db_pos.stop_order_id:
-                        client_cancel_order({'orderId': db_pos.stop_order_id, 'instrument': {'symbol': db_pos.symbols}})
-                    session.delete(db_pos)
-
+                if db_pos.symbols not in api_symbols and db_pos.quantity <= 0:
+                    positions_to_delete.append(db_pos)
+            time.sleep(5)
+            for db_pos in positions_to_delete:
+                if db_pos.stop_order_id:
+                    client_cancel_order({'orderId': db_pos.stop_order_id, 'instrument': {'symbol': db_pos.symbols}})
+                session.delete(db_pos)
             session.commit()
-            print("Database synced with API for all CRYPTO positions.")
+            print("Database synced with API for BTC.")
         except Exception as e:
             session.rollback()
             logging.error(f"Error syncing DB with API: {e}")
-            print(f"Error syncing DB with API: {e}")
         finally:
             session.close()
     finally:
@@ -659,15 +659,6 @@ def calculate_technical_indicators(symbol, lookback_days=200):
             historical_data['adx'] = np.nan
             historical_data['plus_di'] = np.nan
             historical_data['minus_di'] = np.nan
-        try:
-            slowk, slowd = talib.STOCH(historical_data['high'].values, historical_data['low'].values, historical_data['close'].values, fastk_period=14, slowk_period=3, slowd_period=3)
-            historical_data['slowk'] = slowk
-            historical_data['slowd'] = slowd
-        except Exception as e:
-            print(f"Error calculating Stochastic for {symbol}: {e}")
-            logging.error(f"Error calculating Stochastic for {symbol}: {e}")
-            historical_data['slowk'] = np.nan
-            historical_data['slowd'] = np.nan
         historical_data['volume'] = historical_data['volume']
         print(f"Technical indicators calculated for {symbol}.")
         logging.info(f"Technical indicators calculated for {symbol}")
@@ -680,7 +671,7 @@ def calculate_technical_indicators(symbol, lookback_days=200):
 
 def print_technical_indicators(symbol, historical_data):
     print(f"\nTechnical Indicators for {symbol}:\n")
-    tail_data = historical_data[['close', 'macd', 'signal', 'rsi', 'upper_bb', 'middle_bb', 'lower_bb', 'sma_200', 'vwap', 'adx', 'plus_di', 'minus_di', 'volume', 'slowk', 'slowd']].tail()
+    tail_data = historical_data[['close', 'macd', 'signal', 'rsi', 'upper_bb', 'middle_bb', 'lower_bb', 'sma_200', 'vwap', 'adx', 'plus_di', 'minus_di', 'volume']].tail()
     for idx, row in tail_data.iterrows():
         close_color = GREEN if row['close'] >= 0 else RED
         macd_value = row['macd']
@@ -711,16 +702,35 @@ def print_technical_indicators(symbol, historical_data):
         adx_display = f"{adx:.2f}" if not np.isnan(adx) else "N/A"
         plus_di_display = f"{plus_di:.2f}" if not np.isnan(plus_di) else "N/A"
         minus_di_display = f"{minus_di:.2f}" if not np.isnan(minus_di) else "N/A"
-        slowk = row['slowk']
-        slowd = row['slowd']
-        slowk_display = f"{slowk:.2f}" if not np.isnan(slowk) else "N/A"
-        slowd_display = f"{slowd:.2f}" if not np.isnan(slowd) else "N/A"
         print(f"Time: {idx} | Close: {close_color}${row['close']:.2f}{RESET} | "
               f"MACD: {macd_color}{macd_display}{RESET} (Signal: {signal_display}) | "
               f"RSI: {rsi_display} | Upper BB: {upper_display} | Middle BB: {middle_display} | Lower BB: {lower_display} | "
-              f"SMA200: {sma_display} | VWAP: {vwap_display} | ADX: {adx_display} | +DI: {plus_di_display} | -DI: {minus_di_display} | Volume: {row['volume']:.0f} | "
-              f"SlowK: {slowk_display} | SlowD: {slowd_display}")
+              f"SMA200: {sma_display} | VWAP: {vwap_display} | ADX: {adx_display} | +DI: {plus_di_display} | -DI: {minus_di_display} | Volume: {row['volume']:.0f}")
     print("")
+
+@sleep_and_retry
+@limits(calls=CALLS, period=PERIOD)
+def get_daily_rsi(symbol):
+    print(f"Calculating daily RSI for {symbol} using ccxt...")
+    logging.info(f"Calculating daily RSI for {symbol}")
+    exchange = ccxt.coinbase()
+    symbol_usd = f"{symbol}/USD"
+    try:
+        data = exchange.fetch_ohlcv(symbol_usd, timeframe='1d', limit=30)
+        historical_data = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        if historical_data.empty or len(historical_data['close']) < 14:
+            print(f"Insufficient daily data for {symbol} (rows: {len(historical_data)}).")
+            logging.error(f"Insufficient daily data for {symbol} (rows: {len(historical_data)}).")
+            return 50.00
+        rsi = talib.RSI(historical_data['close'], timeperiod=14)[-1]
+        rsi_value = round(rsi, 2) if not np.isnan(rsi) else 50.00
+        print(f"Daily RSI for {symbol}: {rsi_value}")
+        logging.info(f"Daily RSI for {symbol}: {rsi_value}")
+        return rsi_value
+    except Exception as e:
+        print(f"Error calculating daily RSI for {symbol}: {e}")
+        logging.error(f"Error calculating daily RSI for {symbol}: {e}")
+        return 50.00
 
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
@@ -779,64 +789,54 @@ def calculate_buy_points(symbol):
     if historical_data is None:
         return 0
 
-    previous_close = historical_data['close'].iloc[-1]
-
     # RSI (daily)
     rsi = historical_data['rsi'].iloc[-1]
     if not np.isnan(rsi) and rsi < 30:
-        points += 25
+        points += 10
+
+    # Daily RSI
+    daily_rsi = get_daily_rsi(symbol)
+    if daily_rsi < 30:
+        points += 10
 
     # MACD crossover
     macd = historical_data['macd']
     signal = historical_data['signal']
     if len(macd) >= 2 and not np.isnan(macd.iloc[-1]) and not np.isnan(signal.iloc[-1]) and not np.isnan(macd.iloc[-2]) and not np.isnan(signal.iloc[-2]):
         if macd.iloc[-1] > signal.iloc[-1] and macd.iloc[-2] < signal.iloc[-2]:
-            points += 25
+            points += 10
 
     # Volume
     volume = historical_data['volume']
     if volume.iloc[-1] > volume.mean():
-        points += 25
+        points += 10
 
     # Bollinger Bands
     lower_bb = historical_data['lower_bb'].iloc[-1]
     if not np.isnan(lower_bb) and current_price < lower_bb:
-        points += 25
+        points += 10
 
-    atr = get_average_true_range(symbol)
-    if atr is not None:
-        atr_low = previous_close - 0.10 * atr
-        if current_price < atr_low:
-            points += 25
+    # ATR low
+    atr_low = get_atr_low_price(symbol)
+    if atr_low is not None and current_price < atr_low:
+        points += 10
 
     # VWAP
     vwap = historical_data['vwap'].iloc[-1]
     if not np.isnan(vwap) and current_price > vwap:
-        points += 25
+        points += 10
 
     # SMA
     sma_200 = historical_data['sma_200'].iloc[-1]
     if not np.isnan(sma_200) and current_price > sma_200:
-        points += 25
+        points += 10
 
     # Trending momentum (ADX)
     adx = historical_data['adx'].iloc[-1]
     plus_di = historical_data['plus_di'].iloc[-1]
     minus_di = historical_data['minus_di'].iloc[-1]
     if not np.isnan(adx) and adx > 25 and not np.isnan(plus_di) and not np.isnan(minus_di) and plus_di > minus_di:
-        points += 25
-
-    # Stochastic
-    slowk = historical_data['slowk'].iloc[-1]
-    slowd = historical_data['slowd'].iloc[-1]
-    if not np.isnan(slowk) and slowk < 20:
-        points += 25
-    if len(historical_data) >= 2:
-        prev_slowk = historical_data['slowk'].iloc[-2]
-        prev_slowd = historical_data['slowd'].iloc[-2]
-        if not np.isnan(slowk) and not np.isnan(slowd) and not np.isnan(prev_slowk) and not np.isnan(prev_slowd):
-            if slowk > slowd and prev_slowk < prev_slowd:
-                points += 25
+        points += 10
 
     # Bullish candlestick patterns
     points += get_candlestick_points(symbol, 'buy')
@@ -860,64 +860,54 @@ def calculate_sell_points(symbol):
     if historical_data is None:
         return 0
 
-    previous_close = historical_data['close'].iloc[-1]
-
     # RSI (daily)
     rsi = historical_data['rsi'].iloc[-1]
     if not np.isnan(rsi) and rsi > 70:
-        points += 25
+        points += 10
+
+    # Daily RSI
+    daily_rsi = get_daily_rsi(symbol)
+    if daily_rsi > 70:
+        points += 10
 
     # MACD crossover
     macd = historical_data['macd']
     signal = historical_data['signal']
     if len(macd) >= 2 and not np.isnan(macd.iloc[-1]) and not np.isnan(signal.iloc[-1]) and not np.isnan(macd.iloc[-2]) and not np.isnan(signal.iloc[-2]):
         if macd.iloc[-1] < signal.iloc[-1] and macd.iloc[-2] > signal.iloc[-2]:
-            points += 25
+            points += 10
 
     # Volume
     volume = historical_data['volume']
     if volume.iloc[-1] > volume.mean():
-        points += 25
+        points += 10
 
     # Bollinger Bands
     upper_bb = historical_data['upper_bb'].iloc[-1]
     if not np.isnan(upper_bb) and current_price > upper_bb:
-        points += 25
+        points += 10
 
-    atr = get_average_true_range(symbol)
-    if atr is not None:
-        atr_high = previous_close + 0.40 * atr
-        if current_price > atr_high:
-            points += 25
+    # ATR high
+    atr_high = get_atr_high_price(symbol)
+    if atr_high is not None and current_price > atr_high:
+        points += 10
 
     # VWAP
     vwap = historical_data['vwap'].iloc[-1]
     if not np.isnan(vwap) and current_price < vwap:
-        points += 25
+        points += 10
 
     # SMA
     sma_200 = historical_data['sma_200'].iloc[-1]
     if not np.isnan(sma_200) and current_price < sma_200:
-        points += 25
+        points += 10
 
     # Trending momentum (ADX)
     adx = historical_data['adx'].iloc[-1]
     plus_di = historical_data['plus_di'].iloc[-1]
     minus_di = historical_data['minus_di'].iloc[-1]
     if not np.isnan(adx) and adx > 25 and not np.isnan(plus_di) and not np.isnan(minus_di) and plus_di < minus_di:
-        points += 25
-
-    # Stochastic
-    slowk = historical_data['slowk'].iloc[-1]
-    slowd = historical_data['slowd'].iloc[-1]
-    if not np.isnan(slowk) and slowk > 80:
-        points += 25
-    if len(historical_data) >= 2:
-        prev_slowk = historical_data['slowk'].iloc[-2]
-        prev_slowd = historical_data['slowd'].iloc[-2]
-        if not np.isnan(slowk) and not np.isnan(slowd) and not np.isnan(prev_slowk) and not np.isnan(prev_slowd):
-            if slowk < slowd and prev_slowk > prev_slowd:
-                points += 25
+        points += 10
 
     # Bearish candlestick patterns
     points += get_candlestick_points(symbol, 'sell')
@@ -974,10 +964,36 @@ def get_candlestick_points(symbol, side):
                 if res[-1] < 0:
                     detected = True
                     break
-        return 25 if detected else 0
+        return 10 if detected else 0
     except Exception as e:
         logging.error(f"Error in candlestick detection for {symbol}: {e}")
         return 0
+
+@sleep_and_retry
+@limits(calls=CALLS, period=PERIOD)
+def get_atr_high_price(symbol):
+    print(f"Calculating ATR high price for {symbol}...")
+    logging.info(f"Calculating ATR high price for {symbol}")
+    atr_value = get_average_true_range(symbol)
+    current_price = client_get_quote(symbol)
+    atr_high = round(current_price + 0.40 * atr_value, 4) if current_price and atr_value else None
+    price_color = GREEN if atr_high and atr_high >= 0 else RED
+    print(f"ATR high price for {symbol}: {price_color}${atr_high:.4f}{RESET}" if atr_high else f"Failed to calculate ATR high price for {symbol}.")
+    logging.info(f"ATR high price for {symbol}: ${atr_high:.4f}" if atr_high else f"Failed to calculate ATR high price for {symbol}.")
+    return atr_high
+
+@sleep_and_retry
+@limits(calls=CALLS, period=PERIOD)
+def get_atr_low_price(symbol):
+    print(f"Calculating ATR low price for {symbol}...")
+    logging.info(f"Calculating ATR low price for {symbol}")
+    atr_value = get_average_true_range(symbol)
+    current_price = client_get_quote(symbol)
+    atr_low = round(current_price - 0.10 * atr_value, 4) if current_price and atr_value else None
+    price_color = GREEN if atr_low and atr_low >= 0 else RED
+    print(f"ATR low price for {symbol}: {price_color}${atr_low:.4f}{RESET}" if atr_low else f"Failed to calculate ATR low price for {symbol}.")
+    logging.info(f"ATR low price for {symbol}: ${atr_low:.4f}" if atr_low else f"Failed to calculate ATR low price for {symbol}.")
+    return atr_low
 
 def get_previous_price(symbol):
     return previous_prices.get(symbol, client_get_quote(symbol) or 0.0)
@@ -1016,19 +1032,15 @@ def print_database_tables():
             print("\nTrade History In This Robot's Database:")
             print("\nCrypto | Buy or Sell | Quantity | Avg. Price | Date")
             for record in session.query(TradeHistory).filter(TradeHistory.symbols == 'BTC').all():
-                print(f"{record.symbols} | {record.action} | {record.quantity:.5f} | ${record.price:.2f} | {record.date}")
-
+                print(f"{record.symbols} | {record.action} | {record.quantity:.4f} | ${record.price:.2f} | {record.date}")
             print("\nBTC Position in the Database To Sell:")
             print("\nCrypto | Quantity | Avg. Price | Date | Current Price | % Change")
             for record in session.query(Position).filter(Position.symbols == 'BTC').all():
-                qty = round(record.quantity, 5)  # ✅ fix precision
-                if qty <= 0:
-                    continue
                 current_price = client_get_quote(record.symbols)
                 percentage_change = ((current_price - record.avg_price) / record.avg_price * 100) if current_price and record.avg_price else 0
                 color = GREEN if percentage_change >= 0 else RED
                 price_color = GREEN if current_price >= 0 else RED
-                print(f"{record.symbols} | {qty:.5f} | ${record.avg_price:.2f} | {record.purchase_date} | {price_color}${current_price:.2f}{RESET} | {color}{percentage_change:.2f}%{RESET}")
+                print(f"{record.symbols} | {record.quantity:.4f} | ${record.avg_price:.2f} | {record.purchase_date} | {price_color}${current_price:.2f}{RESET} | {color}{percentage_change:.2f}%{RESET}")
         except Exception as e:
             logging.error(f"Error printing database: {e}")
             print(f"Error printing database: {e}")
@@ -1137,33 +1149,42 @@ def buy_cryptos(symbols_to_sell_dict):
             return
         data = rate_limited_fetch_ohlcv(sym, '1d', 200)
         df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        if df.empty or len(df) < 20:
-            print(f"Insufficient historical data for {sym}. Skipping.")
-            logging.info(f"Insufficient historical data for {sym}. Skipping")
+        if df.empty or len(df) < 20:  # At least for BB timeperiod=20
+            print(f"Insufficient historical data for {sym} (daily rows: {len(df)}). Skipping.")
+            logging.info(f"Insufficient historical data for {sym} (daily rows: {len(df)}). Skipping")
             return
         points = calculate_buy_points(sym)
-        if points < POINT_THRESHOLD:
+        if points >= POINT_THRESHOLD:
+            print(f"{sym}: Buy signal detected (Points: {points})")
+            logging.info(f"{sym}: Buy signal detected (Points: {points})")
+        else:
             print(f"{sym}: No buy signal (Points: {points})")
             logging.info(f"{sym}: No buy signal (Points: {points})")
             return
-
-        print(f"{sym}: Buy signal detected (Points: {points})")
-        logging.info(f"{sym}: Buy signal detected (Points: {points})")
-
         session = SessionLocal()
         try:
-            today_date_str = datetime.today().strftime("%Y-%m-%d")
+            print(f"\n{'='*60}")
+            print(f"Processing buy for {sym}...")
+            print(f"{'='*60}")
+            logging.info(f"Processing buy for {sym}")
+            today_date = datetime.today().date()
+            today_date_str = today_date.strftime("%Y-%m-%d")
+            current_datetime = datetime.now(eastern)
+            current_time_str = current_datetime.strftime("Eastern Time | %I:%M:%S %p | %m-%d-%Y |")
+            print(f"Analysis time: {current_time_str}")
+            logging.info(f"Analysis time: {current_time_str}")
             if not ensure_no_open_orders(sym):
-                print(f"Cannot buy {sym}: Open orders still exist.")
-                logging.info(f"Cannot buy {sym}: Open orders still exist")
+                print(f"Cannot buy {sym}: Open orders still exist after cancellation attempt.")
+                logging.info(f"Cannot buy {sym}: Open orders still exist after cancellation attempt.")
                 return
             acc = client_get_account()
             buying_power = float(acc['buying_power_cash'])
+            print(f"Current buying power before buying {sym}: ${buying_power:.2f}")
+            logging.info(f"Current buying power before buying {sym}: ${buying_power:.2f}")
             if buying_power < 10.00:
                 print(f"Buying power < $10.00. Stopping buy orders.")
                 logging.info(f"Buying power < $10.00. Stopping buy orders.")
                 return
-
             dollar_amount = allocation_per_risk.get(risk_levels.get(sym, "ultra-low"), 10.0)
             if ALL_BUY_ORDERS_ARE_5_DOLLARS:
                 dollar_amount = 5.00
@@ -1173,20 +1194,20 @@ def buy_cryptos(symbols_to_sell_dict):
                 print(f"Insufficient buying power for {sym}. Stopping.")
                 logging.info(f"Insufficient buying power for {sym}. Stopping.")
                 return
-
-            qty = round(dollar_amount / current_price, 5)
+            qty = dollar_amount / current_price if current_price else 0
             if qty <= 0:
                 print(f"Invalid quantity for {sym}. Skipping.")
                 logging.info(f"Invalid quantity for {sym}. Skipping.")
                 return
-
-            print(f"Attempting to buy ${dollar_amount:.2f} ({qty:.5f} of {sym})...")
-            logging.info(f"Attempting to buy ${dollar_amount:.2f} ({qty:.5f} of {sym})")
+            print(f"Attempting to buy ${dollar_amount:.2f} ({qty:.4f} of {sym})...")
+            logging.info(f"Attempting to buy ${dollar_amount:.2f} ({qty:.4f} of {sym})")
             order_id = client_place_order(sym, "BUY", amount=dollar_amount)
             if order_id:
+                print(f"Buy order placed for ${dollar_amount:.2f} of {sym}, Order ID: {order_id}")
+                logging.info(f"Buy order placed for ${dollar_amount:.2f} of {sym}, Order ID: {order_id}")
                 status_info = poll_order_status(order_id)
                 if status_info and status_info["status"] == "FILLED":
-                    filled_qty = round(status_info["filled_qty"], 5)  # ✅ enforce 5 decimals
+                    filled_qty = status_info["filled_qty"]
                     filled_price = status_info["avg_price"] or current_price
                     trade = TradeHistory(
                         symbols=sym,
@@ -1198,7 +1219,7 @@ def buy_cryptos(symbols_to_sell_dict):
                     session.add(trade)
                     position = session.query(Position).filter_by(symbols=sym).first()
                     if position:
-                        total_qty = round(position.quantity + filled_qty, 5)  # ✅ enforce 5 decimals
+                        total_qty = position.quantity + filled_qty
                         total_cost = (position.quantity * position.avg_price) + (filled_qty * filled_price)
                         position.avg_price = total_cost / total_qty if total_qty else filled_price
                         position.quantity = total_qty
@@ -1222,9 +1243,19 @@ def buy_cryptos(symbols_to_sell_dict):
                             'Price Per Share': filled_price
                         })
                     send_alert(
-                        f"Bought {filled_qty:.5f} of {sym} at ${filled_price:.2f}",
+                        f"Bought {filled_qty:.4f} of {sym} at ${filled_price:.2f}",
                         subject=f"Trade Executed: Bought {sym}"
                     )
+                    acc = client_get_account()
+                    buying_power = float(acc['buying_power_cash'])
+                    print(f"Updated buying power after buying {sym}: ${buying_power:.2f}")
+                    logging.info(f"Updated buying power after buying {sym}: ${buying_power:.2f}")
+                else:
+                    print(f"Buy order for {sym} not filled or failed (Status: {status_info['status'] if status_info else 'Unknown'}).")
+                    logging.info(f"Buy order for {sym} not filled or failed (Status: {status_info['status'] if status_info else 'Unknown'}).")
+            else:
+                print(f"Failed to place buy order for {sym}.")
+                logging.info(f"Failed to place buy order for {sym}.")
         except Exception as e:
             session.rollback()
             logging.error(f"Error in buy_cryptos: {e}")
@@ -1266,14 +1297,10 @@ def sell_cryptos():
                 profit_color = GREEN if profit_pct >= 0 else RED
                 print(f"{sym}: Current price: {profit_color}${current_price:.2f}{RESET}, Avg price: ${pos.avg_price:.2f}, Profit: {profit_color}{profit_pct:.2f}%{RESET}")
                 logging.info(f"{sym}: Current price: ${current_price:.2f}, Avg price: ${pos.avg_price:.2f}, Profit: {profit_pct:.2f}%")
-
-                # Skip if profit threshold not met
                 if profit_pct < 0.5:
                     print(f"Skipping sell for {sym}: Profit ({profit_pct:.2f}%) is less than 0.5%.")
                     logging.info(f"Skipping sell for {sym}: Profit ({profit_pct:.2f}%) is less than 0.5%")
                     continue
-
-                # Only sell on strong signal
                 if points >= POINT_THRESHOLD:
                     print(f"{sym}: Sell signal detected (Points: {points})")
                     logging.info(f"{sym}: Sell signal detected (Points: {points})")
@@ -1281,13 +1308,11 @@ def sell_cryptos():
                         print(f"Cannot sell {sym}: Open orders exist.")
                         logging.info(f"Cannot sell {sym}: Open orders exist")
                         continue
-
-                    sell_qty = round(pos.quantity, 5)
-                    if sell_qty <= 0:
-                        print(f"Skipped sell for {sym}: Rounded quantity is zero.")
-                        logging.info(f"Skipped sell for {sym}: Rounded quantity is zero")
+                    sell_qty = round(pos.quantity, 5) if FRACTIONAL_BUY_ORDERS else int(pos.quantity)
+                    if sell_qty == 0:
+                        print(f"Skipped sell for {sym}: Quantity {sell_qty} is zero.")
+                        logging.info(f"Skipped sell for {sym}: Quantity {sell_qty} is zero")
                         continue
-
                     for attempt in range(3):
                         try:
                             order_id = client_place_order(
@@ -1301,7 +1326,7 @@ def sell_cryptos():
                                 logging.info(f"Placed sell order for {sell_qty:.5f} of {sym}, Order ID: {order_id}")
                                 status = poll_order_status(order_id, timeout=300)
                                 if status and status["status"] == "FILLED":
-                                    filled_qty = round(status["filled_qty"], 5)
+                                    filled_qty = status["filled_qty"]
                                     filled_price = status["avg_price"] or current_price
                                     trade = TradeHistory(
                                         symbols=sym,
@@ -1311,16 +1336,12 @@ def sell_cryptos():
                                         date=datetime.now(eastern).strftime("%Y-%m-%d")
                                     )
                                     session.add(trade)
-
-                                    # ✅ Update remaining position, round to 5 decimals
-                                    pos.quantity = round(pos.quantity - filled_qty, 5)
-                                    if pos.quantity <= 0.00001:  # ✅ remove dust
+                                    pos.quantity -= filled_qty
+                                    if pos.quantity <= 0:
                                         if pos.stop_order_id:
                                             client_cancel_order({'orderId': pos.stop_order_id, 'instrument': {'symbol': sym}})
                                         session.delete(pos)
-
                                     session.commit()
-
                                     with open(csv_filename, mode='a', newline='') as csv_file:
                                         csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
                                         csv_writer.writerow({
@@ -1346,10 +1367,6 @@ def sell_cryptos():
                                 print(f"HTTP 400 error on attempt {attempt + 1} for {sym}: {e.response.text}")
                                 logging.error(f"HTTP 400 error for {sym}: {e.response.text}")
                                 adjusted_qty = round(pos.quantity, 5)
-                                if adjusted_qty <= 0:
-                                    print(f"Retry skipped: Rounded quantity is zero for {sym}")
-                                    logging.info(f"Retry skipped: Rounded quantity is zero for {sym}")
-                                    break
                                 print(f"Retrying with adjusted quantity: {adjusted_qty:.5f}")
                                 logging.info(f"Retrying with adjusted quantity: {adjusted_qty:.5f}")
                                 order_id = client_place_order(
@@ -1359,9 +1376,11 @@ def sell_cryptos():
                                     quantity=adjusted_qty
                                 )
                                 if order_id:
+                                    print(f"Retry sell order placed for {adjusted_qty:.5f} of {sym}, Order ID: {order_id}")
+                                    logging.info(f"Retry sell order placed for {adjusted_qty:.5f} of {sym}, Order ID: {order_id}")
                                     status = poll_order_status(order_id, timeout=300)
                                     if status and status["status"] == "FILLED":
-                                        filled_qty = round(status["filled_qty"], 5)
+                                        filled_qty = status["filled_qty"]
                                         filled_price = status["avg_price"] or current_price
                                         trade = TradeHistory(
                                             symbols=sym,
@@ -1371,13 +1390,11 @@ def sell_cryptos():
                                             date=datetime.now(eastern).strftime("%Y-%m-%d")
                                         )
                                         session.add(trade)
-
-                                        pos.quantity = round(pos.quantity - filled_qty, 5)
-                                        if pos.quantity <= 0.00001:
+                                        pos.quantity -= filled_qty
+                                        if pos.quantity <= 0:
                                             if pos.stop_order_id:
                                                 client_cancel_order({'orderId': pos.stop_order_id, 'instrument': {'symbol': sym}})
                                             session.delete(pos)
-
                                         session.commit()
                                         with open(csv_filename, mode='a', newline='') as csv_file:
                                             csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
@@ -1439,10 +1456,10 @@ def main():
             total_equity = acc['equity']
             buying_power = acc['buying_power_cash']
             print(f"\n{'='*60}")
-            print(f"Waiting 15 seconds. Total equity: ${total_equity:.2f}, Buying power: ${buying_power:.2f}")
+            print(f"Waiting 45 seconds. Total equity: ${total_equity:.2f}, Buying power: ${buying_power:.2f}")
             print(f"{'='*60}\n")
-            logging.info(f"Waiting 15 seconds. Total equity: ${total_equity:.2f}, Buying power: ${buying_power:.2f}")
-            time.sleep(15)
+            logging.info(f"Waiting 45 seconds. Total equity: ${total_equity:.2f}, Buying power: ${buying_power:.2f}")
+            time.sleep(45)
         except Exception as e:
             logging.error(f"Error in main loop: {e}")
             print(f"Error in main loop: {e}")
