@@ -1163,26 +1163,55 @@ def get_previous_price(symbol):
 def update_previous_price(symbol, current_price):
     previous_prices[symbol] = current_price
 
+@sleep_and_retry
+@limits(calls=CALLS, period=PERIOD)
 def track_price_changes(symbol):
+    """Track price changes for a given symbol, skipping equities and handling None prices."""
+    # Fetch API positions to check asset type
+    api_positions = client_list_positions()
+    api_positions_dict = {p['symbol']: p for p in api_positions}
+    api_pos = api_positions_dict.get(symbol, {})
+    asset_type = api_pos.get('type', 'CRYPTO')  # Default to CRYPTO if type is missing
+    if asset_type == 'EQUITY':
+        print(f"Skipping price tracking for {symbol}: Position type is EQUITY, not CRYPTO.")
+        logging.info(f"Skipping price tracking for {symbol}: Position type is EQUITY, not CRYPTO")
+        return
+    
+    print(f"Tracking price changes for {symbol}...")
+    logging.info(f"Tracking price changes for {symbol}")
+    
     current_price = client_get_quote(symbol)
-    previous_price = get_previous_price(symbol)
-    price_change = current_price - previous_price if current_price and previous_price else 0
-    change_color = GREEN if price_change >= 0 else RED
-    current_color = GREEN if current_price >= 0 else RED
-    previous_color = GREEN if previous_price >= 0 else RED
-    price_changes[symbol] = price_changes.get(symbol, {'increased': 0, 'decreased': 0})
-    if current_price > previous_price:
-        price_changes[symbol]['increased'] += 1
-        print(f"{symbol} price just increased | current price: {current_color}${current_price:.5f}{RESET} (change: {change_color}${price_change:.5f}{RESET})")
-        logging.info(f"{symbol} price just increased | current price: ${current_price:.5f} (change: ${price_change:.5f})")
-    elif current_price < previous_price:
-        price_changes[symbol]['decreased'] += 1
-        print(f"{symbol} price just decreased | current price: {current_color}${current_price:.5f}{RESET} (change: {change_color}${price_change:.5f}{RESET})")
-        logging.info(f"{symbol} price just decreased | current price: ${current_price:.5f} (change: ${price_change:.5f})")
-    else:
-        print(f"{symbol} price has not changed | current price: {current_color}${current_price:.5f}{RESET}")
-        logging.info(f"{symbol} price has not changed | current price: ${current_price:.5f}")
-    update_previous_price(symbol, current_price)
+    if current_price is None:
+        print(f"No valid price data for {symbol} from Public.com. Skipping price tracking.")
+        logging.warning(f"No valid price data for {symbol} from Public.com. Skipping price tracking")
+        return
+    
+    # Ensure current_price is valid for comparison
+    current_color = GREEN if isinstance(current_price, (int, float)) and current_price >= 0 else RED
+    print(f"{symbol}: Current price: {current_color}${current_price:.5f}{RESET}")
+    logging.info(f"{symbol}: Current price: ${current_price:.5f}")
+    
+    # Fetch historical price data (example logic; adjust based on actual implementation)
+    try:
+        # Assuming this function stores price history or calculates indicators
+        # Example: Store price in cache or database for trend analysis
+        price_history = data_cache.get(f"{symbol}_price_history", [])
+        price_history.append({'price': current_price, 'timestamp': time.time()})
+        if len(price_history) > 100:  # Limit history to last 100 prices
+            price_history = price_history[-100:]
+        data_cache[f"{symbol}_price_history"] = price_history
+        
+        # Example: Calculate price change (adjust based on actual logic)
+        if len(price_history) > 1:
+            previous_price = price_history[-2]['price']
+            price_change = ((current_price - previous_price) / previous_price * 100) if previous_price > 0 else 0
+            change_color = GREEN if price_change >= 0 else RED
+            print(f"{symbol}: Price change: {change_color}{price_change:.2f}%{RESET}")
+            logging.info(f"{symbol}: Price change: {price_change:.2f}%")
+    except Exception as e:
+        logging.error(f"Error tracking price changes for {symbol}: {e}")
+        print(f"Error tracking price changes for {symbol}: {e}")
+
 
 def check_price_moves():
     track_price_changes('BTC')
