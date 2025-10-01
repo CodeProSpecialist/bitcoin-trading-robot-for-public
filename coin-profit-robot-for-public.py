@@ -492,13 +492,13 @@ def client_list_positions():
             sym = inst.get('symbol')
             inst_type = inst.get('type')
 
-            # Ensure we only process CRYPTO and specifically BTC
-            if inst_type != 'CRYPTO' or sym != 'BTC':
-                continue
+            # Only include CRYPTO positions
+            if inst_type != 'CRYPTO':
+                continue  
 
             qty = round(float(p.get('quantity', 0)), 5)
             if qty <= 0:
-                continue  # Skip empty or dust positions
+                continue  # skip empty or dust
 
             avg = round(float(p.get('costBasis', {}).get('unitCost', 0)), 2)
             opened_at = p.get('openedAt', datetime.now(eastern).strftime("%Y-%m-%d"))
@@ -509,8 +509,7 @@ def client_list_positions():
 
             current_price = client_get_quote(sym)
             price_color = GREEN if current_price >= 0 else RED
-            print(f"Position: {sym} (Type: {inst_type}) | Qty: {qty:.5f} | "
-                  f"Avg Price: ${avg:.2f} | Current Price: {price_color}${current_price:.2f}{RESET}")
+            print(f"Position: {sym} (CRYPTO) | Qty: {qty:.5f} | Avg Price: ${avg:.2f} | Current Price: {price_color}${current_price:.2f}{RESET}")
 
             out.append({
                 'symbol': sym,
