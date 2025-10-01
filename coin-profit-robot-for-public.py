@@ -1214,7 +1214,22 @@ def track_price_changes(symbol):
 
 
 def check_price_moves():
-    track_price_changes('BTC')
+    """Check price movements for crypto positions only."""
+    print("Checking price movements...")
+    logging.info("Checking price movements")
+    api_positions = client_list_positions()
+    crypto_symbols = [p['symbol'] for p in api_positions if p.get('type', 'CRYPTO') == 'CRYPTO']
+    
+    if 'BTC' not in crypto_symbols:
+        print("BTC not found in crypto positions. Skipping price check.")
+        logging.info("BTC not found in crypto positions. Skipping price check")
+        return
+    
+    try:
+        track_price_changes('BTC')
+    except Exception as e:
+        logging.error(f"Error checking price moves for BTC: {e}")
+        print(f"Error checking price moves for BTC: {e}")
 
 def print_database_tables():
     if PRINT_DATABASE:
