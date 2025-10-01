@@ -488,22 +488,36 @@ def client_list_positions():
         pos_list = data.get('positions', [])
         out = []
         for p in pos_list:
-            sym = p.get('instrument', {}).get('symbol')
-            if sym != 'BTC':
-                continue  # Only process BTC
-            qty = round(float(p.get('quantity', 0)), 5)  # ✅ Fix: round to 5 decimals
+            inst = p.get('instrument', {})
+            sym = inst.get('symbol')
+            inst_type = inst.get('type')
+
+            # Ensure we only process CRYPTO and specifically BTC
+            if inst_type != 'CRYPTO' or sym != 'BTC':
+                continue
+
+            qty = round(float(p.get('quantity', 0)), 5)
             if qty <= 0:
                 continue  # Skip empty or dust positions
+
             avg = round(float(p.get('costBasis', {}).get('unitCost', 0)), 2)
             opened_at = p.get('openedAt', datetime.now(eastern).strftime("%Y-%m-%d"))
             try:
                 date_str = datetime.fromisoformat(opened_at.replace('Z', '+00:00')).astimezone(eastern).strftime("%Y-%m-%d")
             except ValueError:
                 date_str = datetime.now(eastern).strftime("%Y-%m-%d")
+
             current_price = client_get_quote(sym)
             price_color = GREEN if current_price >= 0 else RED
-            print(f"Position: {sym} | Qty: {qty:.5f} | Avg Price: ${avg:.2f} | Current Price: {price_color}${current_price:.2f}{RESET}")
-            out.append({'symbol': sym, 'qty': qty, 'avg_entry_price': avg, 'purchase_date': date_str})
+            print(f"Position: {sym} (Type: {inst_type}) | Qty: {qty:.5f} | "
+                  f"Avg Price: ${avg:.2f} | Current Price: {price_color}${current_price:.2f}{RESET}")
+
+            out.append({
+                'symbol': sym,
+                'qty': qty,
+                'avg_entry_price': avg,
+                'purchase_date': date_str
+            })
         return out
     except Exception as e:
         logging.error(f"Positions fetch error: {e}")
