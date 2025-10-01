@@ -55,7 +55,7 @@ risk_levels = {
 allocation_per_risk = {
     "ultra-low": 10.0
 }
-symbol = { "BTC" }
+symbol = {"BTC"}
 symbols_to_sell_dict = {}
 today_date = datetime.today().date()
 today_datetime = datetime.now(pytz.timezone('US/Eastern'))
@@ -176,10 +176,10 @@ def get_cached_data(symbols, data_type, fetch_func, *args, **kwargs):
 
 def cleanup_invalid_positions():
     with SessionLocal() as session:
-        invalid_positions = session.query(Position).filter(Position.avg_price <= 0).all()
+        invalid_positions = session.query(Position).filter((Position.avg_price <= 0) | (Position.quantity <= 0)).all()
         for pos in invalid_positions:
-            print(f"Deleting invalid position for {pos.symbols} with avg_price ${pos.avg_price:.5f}")
-            logging.info(f"Deleting invalid position for {pos.symbols} with avg_price ${pos.avg_price:.5f}")
+            print(f"Deleting invalid position for {pos.symbols} with avg_price ${pos.avg_price:.5f} and quantity {pos.quantity:.8f}")
+            logging.info(f"Deleting invalid position for {pos.symbols} with avg_price ${pos.avg_price:.5f} and quantity {pos.quantity:.8f}")
             if pos.stop_order_id:
                 client_cancel_order({'orderId': pos.stop_order_id, 'instrument': {'symbol': get_trading_symbol(pos.symbols)}})
             session.delete(pos)
@@ -674,10 +674,15 @@ def sync_db_with_api():
                 qty = pos['qty']
                 avg_price = pos['avg_entry_price']
                 purchase_date = pos['purchase_date']
+                # Skip positions with invalid avg_price
+                if avg_price <= 0:
+                    logging.warning(f"API returned invalid avg_price (${avg_price:.5f}) for {symbol}. Skipping DB update.")
+                    continue
                 db_pos = session.query(Position).filter_by(symbols=symbol).first()
                 if db_pos:
                     db_pos.quantity = qty
                     db_pos.avg_price = avg_price
+                    db_pos.purchase_date = purchase_date
                 else:
                     db_pos = Position(
                         symbols=symbol,
@@ -687,18 +692,20 @@ def sync_db_with_api():
                     )
                     session.add(db_pos)
             for db_pos in session.query(Position).all():
-                if db_pos.symbols not in api_symbols and db_pos.quantity <= 0:
+                if db_pos.symbols not in api_symbols or db_pos.quantity <= 0 or db_pos.avg_price <= 0:
                     positions_to_delete.append(db_pos)
-            time.sleep(5)
             for db_pos in positions_to_delete:
                 if db_pos.stop_order_id:
                     client_cancel_order({'orderId': db_pos.stop_order_id, 'instrument': {'symbol': get_trading_symbol(db_pos.symbols)}})
+                logging.info(f"Deleting position for {db_pos.symbols} with quantity {db_pos.quantity:.8f} and avg_price ${db_pos.avg_price:.5f}")
                 session.delete(db_pos)
             session.commit()
             print("Database synced with API for BTC.")
+            logging.info("Database synced with API for BTC")
         except Exception as e:
             session.rollback()
             logging.error(f"Error syncing DB with API: {e}")
+            print(f"Error syncing DB with API: {e}")
         finally:
             session.close()
     finally:
@@ -1332,7 +1339,10 @@ def buy_cryptos(symbols_to_sell_dict):
                 status_info = poll_order_status(order_id)
                 if status_info and status_info["status"] == "FILLED":
                     filled_qty = status_info["filled_qty"]
-                    filled_price = status_info["avg_price"] or current_price
+                    filled_price = status_info["avg_price"]
+                    if filled_price is None or filled_price <= 0:
+                        filled_price = current_price
+                        logging.warning(f"Invalid filled_price for {sym} order {order_id}. Using current_price ${current_price:.5f}.")
                     trade = TradeHistory(
                         symbols=sym,
                         action='buy',
@@ -1343,6 +1353,9 @@ def buy_cryptos(symbols_to_sell_dict):
                     session.add(trade)
                     position = session.query(Position).filter_by(symbols=sym).first()
                     if position:
+                        if position.avg_price <= 0:
+                            position.avg_price = filled_price
+                            logging.warning(f"Corrected invalid avg_price for {sym} in database to ${filled_price:.5f}.")
                         total_qty = position.quantity + filled_qty
                         total_cost = (position.quantity * position.avg_price) + (filled_qty * filled_price)
                         position.avg_price = total_cost / total_qty if total_qty else filled_price
@@ -1398,10 +1411,14 @@ def sell_cryptos():
     try:
         print("\nStarting sell_cryptos function...")
         logging.info("Starting sell_cryptos function")
-        sync_db_with_api()  # Sync database with API before checking local positions
+        sync_db_with_api()  # Sync database with API
         list_owned_positions()
         session = SessionLocal()
         try:
+            # Fetch API positions for cross-referencing
+            api_positions = client_list_positions()
+            api_positions_dict = {p['symbol']: p for p in api_positions}
+            
             positions = session.query(Position).filter(Position.quantity > 0.000000001, Position.symbols == 'BTC').all()
             if not positions:
                 print("No BTC positions to sell.")
@@ -1419,15 +1436,36 @@ def sell_cryptos():
                     print(f"No valid price data for {sym}. Skipping.")
                     logging.info(f"No valid price data for {sym}. Skipping")
                     continue
-                points = calculate_sell_points(sym)
-                profit_pct = ((current_price - pos.avg_price) / pos.avg_price * 100) if pos.avg_price > 0 else 0
+                
+                # Get API position data for fallback
+                api_pos = api_positions_dict.get(sym, {})
+                api_avg_price = api_pos.get('avg_entry_price', pos.avg_price)
+                api_gain_percentage = api_pos.get('gain_percentage', None)
+                
+                # Calculate profit percentage
+                if pos.avg_price > 0:
+                    profit_pct = ((current_price - pos.avg_price) / pos.avg_price * 100)
+                elif api_avg_price > 0:
+                    profit_pct = ((current_price - api_avg_price) / api_avg_price * 100)
+                elif api_gain_percentage is not None:
+                    profit_pct = api_gain_percentage
+                else:
+                    profit_pct = 0
+                    logging.warning(f"No valid avg_price or gain_percentage for {sym}. Using profit_pct=0.")
+                
                 profit_color = GREEN if profit_pct >= 0 else RED
-                print(f"{sym}: Current price: {profit_color}${current_price:.5f}{RESET}, Avg price: ${pos.avg_price:.5f}, Profit: {profit_color}{profit_pct:.2f}%{RESET}")
-                logging.info(f"{sym}: Current price: ${current_price:.5f}, Avg price: ${pos.avg_price:.5f}, Profit: {profit_pct:.2f}%")
+                print(f"{sym}: Current price: {profit_color}${current_price:.5f}{RESET}, "
+                      f"Avg price: ${pos.avg_price:.5f} (API: ${api_avg_price:.5f}), "
+                      f"Profit: {profit_color}{profit_pct:.2f}%{RESET}")
+                logging.info(f"{sym}: Current price: ${current_price:.5f}, Avg price: ${pos.avg_price:.5f} "
+                             f"(API: ${api_avg_price:.5f}), Profit: {profit_pct:.2f}%")
+                
                 if profit_pct < 0.5:
                     print(f"Skipping sell for {sym}: Profit ({profit_pct:.2f}%) is less than 0.5%.")
                     logging.info(f"Skipping sell for {sym}: Profit ({profit_pct:.2f}%) is less than 0.5%")
                     continue
+                
+                points = calculate_sell_points(sym)
                 if points >= POINT_THRESHOLD:
                     print(f"{sym}: Sell signal detected (Points: {points})")
                     logging.info(f"{sym}: Sell signal detected (Points: {points})")
@@ -1487,119 +1525,163 @@ def sell_cryptos():
                                         f"Sold {filled_qty:.8f} of {sym} at ${filled_price:.5f}",
                                         subject=f"Sell Executed: {sym}"
                                     )
-                                    print(f"Sell Order for {filled_qty:.8f} of {sym} at ${filled_price:.5f}")
-                                    logging.info(f"Sell Order for {filled_qty:.8f} of {sym} at ${filled_price:.5f}")
+                                    print(f"Sell order filled for {filled_qty:.8f} of {sym} at ${filled_price:.5f}")
+                                    logging.info(f"Sell order filled for {filled_qty:.8f} of {sym} at ${filled_price:.5f}")
                                     break
+                                else:
+                                    print(f"Sell order for {sym} not filled (Status: {status['status'] if status else 'Unknown'}).")
+                                    logging.info(f"Sell order for {sym} not filled (Status: {status['status'] if status else 'Unknown'}).")
                             else:
-                                print(f"Sell order failed for {sym}.")
-                                logging.info(f"Sell order failed for {sym}")
-                        except HTTPError as e:
-                            if e.response.status_code == 400:
-                                print(f"HTTP 400 error on attempt {attempt + 1} for {sym}: {e.response.text}")
-                                logging.error(f"HTTP 400 error for {sym}: {e.response.text}")
-                                adjusted_qty = round(pos.quantity, 8)
-                                if adjusted_qty < 0.00001:
-                                    print(f"Skipped retry sell for {sym}: Adjusted quantity {adjusted_qty:.8f} is below minimum 0.00001.")
-                                    logging.info(f"Skipped retry sell for {sym}: Adjusted quantity {adjusted_qty:.8f} is below minimum 0.00001")
+                                print(f"Failed to place sell order for {sym} on attempt {attempt + 1}.")
+                                logging.info(f"Failed to place sell order for {sym} on attempt {attempt + 1}.")
+                                if attempt < 2:
+                                    time.sleep(2)
+                        except Exception as e:
+                            logging.error(f"Error placing sell order for {sym} on attempt {attempt + 1}: {e}")
+                            print(f"Error placing sell order for {sym} on attempt {attempt + 1}: {e}")
+                            if attempt < 2:
+                                time.sleep(2)
+                elif profit_pct >= 3.0:  # Sell if profit is 3% or more
+                    print(f"{sym}: Selling due to {profit_pct:.2f}% profit (>= 3%)")
+                    logging.info(f"{sym}: Selling due to {profit_pct:.2f}% profit (>= 3%)")
+                    if not ensure_no_open_orders(sym):
+                        print(f"Cannot sell {sym}: Open orders exist.")
+                        logging.info(f"Cannot sell {sym}: Open orders exist")
+                        continue
+                    sell_qty = round(pos.quantity, 8) if FRACTIONAL_BUY_ORDERS else int(pos.quantity)
+                    if sell_qty < 0.00001:
+                        print(f"Skipped sell for {sym}: Quantity {sell_qty:.8f} is below minimum 0.00001.")
+                        logging.info(f"Skipped sell for {sym}: Quantity {sell_qty:.8f} is below minimum 0.00001")
+                        continue
+                    if sell_qty == 0:
+                        print(f"Skipped sell for {sym}: Quantity {sell_qty} is zero.")
+                        logging.info(f"Skipped sell for {sym}: Quantity {sell_qty} is zero")
+                        continue
+                    for attempt in range(3):
+                        try:
+                            order_id = client_place_order(
+                                symbol=trading_sym,
+                                side="SELL",
+                                amount=None,
+                                quantity=sell_qty
+                            )
+                            if order_id:
+                                print(f"Placed sell order for {sell_qty:.8f} of {sym} due to 3% profit, Order ID: {order_id}")
+                                logging.info(f"Placed sell order for {sell_qty:.8f} of {sym} due to 3% profit, Order ID: {order_id}")
+                                status = poll_order_status(order_id, timeout=300)
+                                if status and status["status"] == "FILLED":
+                                    filled_qty = status["filled_qty"]
+                                    filled_price = status["avg_price"] or current_price
+                                    trade = TradeHistory(
+                                        symbols=sym,
+                                        action='sell',
+                                        quantity=filled_qty,
+                                        price=filled_price,
+                                        date=datetime.now(eastern).strftime("%Y-%m-%d")
+                                    )
+                                    session.add(trade)
+                                    pos.quantity -= filled_qty
+                                    if pos.quantity <= 0:
+                                        if pos.stop_order_id:
+                                            client_cancel_order({'orderId': pos.stop_order_id, 'instrument': {'symbol': trading_sym}})
+                                        session.delete(pos)
+                                    session.commit()
+                                    with open(csv_filename, mode='a', newline='') as csv_file:
+                                        csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+                                        csv_writer.writerow({
+                                            'Date': datetime.now(eastern).strftime("%Y-%m-%d"),
+                                            'Buy': ' ',
+                                            'Sell': 'Sell',
+                                            'Quantity': filled_qty,
+                                            'Symbol': sym,
+                                            'Price Per Share': filled_price
+                                        })
+                                    send_alert(
+                                        f"Sold {filled_qty:.8f} of {sym} at ${filled_price:.5f} due to {profit_pct:.2f}% profit",
+                                        subject=f"Sell Executed: {sym} (3% Profit)"
+                                    )
+                                    print(f"Sell order filled for {filled_qty:.8f} of {sym} at ${filled_price:.5f} due to {profit_pct:.2f}% profit")
+                                    logging.info(f"Sell order filled for {filled_qty:.8f} of {sym} at ${filled_price:.5f} due to {profit_pct:.2f}% profit")
                                     break
-                                print(f"Retrying with adjusted quantity: {adjusted_qty:.8f}")
-                                logging.info(f"Retrying with adjusted quantity: {adjusted_qty:.8f}")
-                                order_id = client_place_order(
-                                    symbol=trading_sym,
-                                    side="SELL",
-                                    amount=None,
-                                    quantity=adjusted_qty
-                                )
-                                if order_id:
-                                    print(f"Retry sell order placed for {adjusted_qty:.8f} of {sym}, Order ID: {order_id}")
-                                    logging.info(f"Retry sell order placed for {adjusted_qty:.8f} of {sym}, Order ID: {order_id}")
-                                    status = poll_order_status(order_id, timeout=300)
-                                    if status and status["status"] == "FILLED":
-                                        filled_qty = status["filled_qty"]
-                                        filled_price = status["avg_price"] or current_price
-                                        trade = TradeHistory(
-                                            symbols=sym,
-                                            action='sell',
-                                            quantity=filled_qty,
-                                            price=filled_price,
-                                            date=datetime.now(eastern).strftime("%Y-%m-%d")
-                                        )
-                                        session.add(trade)
-                                        pos.quantity -= filled_qty
-                                        if pos.quantity <= 0:
-                                            if pos.stop_order_id:
-                                                client_cancel_order({'orderId': pos.stop_order_id, 'instrument': {'symbol': trading_sym}})
-                                            session.delete(pos)
-                                        session.commit()
-                                        with open(csv_filename, mode='a', newline='') as csv_file:
-                                            csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
-                                            csv_writer.writerow({
-                                                'Date': datetime.now(eastern).strftime("%Y-%m-%d"),
-                                                'Buy': ' ',
-                                                'Sell': 'Sell',
-                                                'Quantity': filled_qty,
-                                                'Symbol': sym,
-                                                'Price Per Share': filled_price
-                                            })
-                                        send_alert(
-                                            f"Sold {filled_qty:.8f} of {sym} at ${filled_price:.5f}",
-                                            subject=f"Sell Executed: {sym}"
-                                        )
-                                        print(f"Retry sell executed for {filled_qty:.8f} of {sym} at ${filled_price:.5f}")
-                                        logging.info(f"Retry sell executed for {filled_qty:.8f} of {sym} at ${filled_price:.5f}")
-                                        break
-                            if attempt == 2:
-                                print(f"All retries failed for {sym}.")
-                                logging.error(f"All retries failed for {sym}")
+                                else:
+                                    print(f"Sell order for {sym} not filled (Status: {status['status'] if status else 'Unknown'}).")
+                                    logging.info(f"Sell order for {sym} not filled (Status: {status['status'] if status else 'Unknown'}).")
+                            else:
+                                print(f"Failed to place sell order for {sym} on attempt {attempt + 1}.")
+                                logging.info(f"Failed to place sell order for {sym} on attempt {attempt + 1}.")
+                                if attempt < 2:
+                                    time.sleep(2)
+                        except Exception as e:
+                            logging.error(f"Error placing sell order for {sym} on attempt {attempt + 1}: {e}")
+                            print(f"Error placing sell order for {sym} on attempt {attempt + 1}: {e}")
+                            if attempt < 2:
+                                time.sleep(2)
                 else:
-                    print(f"{sym}: No sell signal (Points: {points})")
-                    logging.info(f"{sym}: No sell signal (Points: {points})")
+                    print(f"No sell signal for {sym} (Points: {points}, Profit: {profit_pct:.2f}%)")
+                    logging.info(f"No sell signal for {sym} (Points: {points}, Profit: {profit_pct:.2f}%)")
         except Exception as e:
             session.rollback()
             logging.error(f"Error in sell_cryptos: {e}")
             print(f"Error in sell_cryptos: {e}")
-            traceback.print_exc()
         finally:
             session.close()
     finally:
         task_running['sell_cryptos'] = False
 
-def main():
+
+def main_loop():
+    """Main trading loop."""
+    global symbols_to_sell_dict
     initialize_csv()
-    print(f"Starting trading bot for BTC at {datetime.now(eastern).strftime('%Y-%m-%d %H:%M:%S %Z')}...")
-    logging.info(f"Starting trading bot for BTC at {datetime.now(eastern).strftime('%Y-%m-%d %H:%M:%S %Z')}")
+    print(f"Starting trading bot at {datetime.now(eastern).strftime('%Y-%m-%d %H:%M:%S %Z')}")
+    logging.info(f"Starting trading bot at {datetime.now(eastern).strftime('%Y-%m-%d %H:%M:%S %Z')}")
     if not fetch_token_and_account():
         print("Failed to initialize token and account. Exiting.")
-        logging.error("Failed to initialize token and account. Exiting")
+        logging.error("Failed to initialize token and account. Exiting.")
         return
+    cleanup_invalid_positions()  # Clean up invalid positions at startup
+    sync_db_with_api()  # Initial sync
+    symbols_to_sell_dict = load_positions_from_database()
+    if PRINT_ROBOT_STORED_BUY_AND_SELL_LIST_DATABASE:
+        print_database_tables()
     while True:
         try:
             if not refresh_token_if_needed():
-                print("Failed to refresh token. Retrying in 60 seconds.")
-                logging.error("Failed to refresh token. Retrying in 60 seconds")
-                time.sleep(60)
-                continue
-            sync_db_with_api()
-            cleanup_invalid_positions()
-            symbols_to_sell_dict = load_positions_from_database()
-            if PRINT_ROBOT_STORED_BUY_AND_SELL_LIST_DATABASE:
-                print_database_tables()
+                print("Token refresh failed. Exiting.")
+                logging.error("Token refresh failed. Exiting.")
+                break
+            print(f"\n{'='*60}")
+            print(f"Starting new cycle at {datetime.now(eastern).strftime('%Y-%m-%d %H:%M:%S %Z')}")
+            print(f"{'='*60}")
+            logging.info(f"Starting new cycle at {datetime.now(eastern).strftime('%Y-%m-%d %H:%M:%S %Z')}")
+            current_time = datetime.now(eastern).time()
+            market_open = time2(9, 30)
+            market_close = time2(16, 0)
+            # Crypto markets are 24/7, so no market hour checks needed
             check_price_moves()
             buy_cryptos(symbols_to_sell_dict)
             sell_cryptos()
-            acc = client_get_account()
-            total_equity = acc['equity']
-            buying_power = acc['buying_power_cash']
-            print(f"\n{'='*60}")
-            print(f"Waiting 15 seconds. Total equity: ${total_equity:.2f}, Buying power: ${buying_power:.2f}")
-            print(f"{'='*60}\n")
-            logging.info(f"Waiting 15 seconds. Total equity: ${total_equity:.2f}, Buying power: ${buying_power:.2f}")
-            time.sleep(15)
+            if PRINT_ROBOT_STORED_BUY_AND_SELL_LIST_DATABASE:
+                print_database_tables()
+            # Clear cache periodically to prevent stale data
+            current_time = time.time()
+            keys_to_remove = [key for key, value in data_cache.items() if current_time - value['timestamp'] > CACHE_EXPIRY]
+            for key in keys_to_remove:
+                del data_cache[key]
+            print(f"Cycle completed. Waiting 2 minutes before next cycle...")
+            logging.info(f"Cycle completed. Waiting 2 minutes before next cycle")
+            time.sleep(120)  # Wait 2 minutes
+        except KeyboardInterrupt:
+            print("\nKeyboardInterrupt detected. Exiting gracefully...")
+            logging.info("KeyboardInterrupt detected. Exiting gracefully")
+            break
         except Exception as e:
             logging.error(f"Error in main loop: {e}")
             print(f"Error in main loop: {e}")
             traceback.print_exc()
-            time.sleep(60)
+            time.sleep(60)  # Wait before retrying
 
 if __name__ == "__main__":
-    main()
+    main_loop()
+
+
