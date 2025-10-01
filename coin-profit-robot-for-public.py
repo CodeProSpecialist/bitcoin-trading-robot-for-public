@@ -1474,8 +1474,8 @@ def sell_cryptos():
                 logging.info(f"Evaluating {sym} for sell signal")
                 current_price = client_get_quote(sym)
                 if current_price is None:
-                    print(f"No valid price data for {sym}. Skipping.")
-                    logging.info(f"No valid price data for {sym}. Skipping")
+                    print(f"No valid price data for {sym} from Public.com. Skipping.")
+                    logging.info(f"No valid price data for {sym} from Public.com. Skipping")
                     continue
                 
                 # Get average price: prioritize API, fallback to database
