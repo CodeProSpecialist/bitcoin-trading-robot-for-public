@@ -1014,15 +1014,19 @@ def print_database_tables():
             print("\nTrade History In This Robot's Database:")
             print("\nCrypto | Buy or Sell | Quantity | Avg. Price | Date")
             for record in session.query(TradeHistory).filter(TradeHistory.symbols == 'BTC').all():
-                print(f"{record.symbols} | {record.action} | {record.quantity:.4f} | ${record.price:.2f} | {record.date}")
+                print(f"{record.symbols} | {record.action} | {record.quantity:.5f} | ${record.price:.2f} | {record.date}")
+
             print("\nBTC Position in the Database To Sell:")
             print("\nCrypto | Quantity | Avg. Price | Date | Current Price | % Change")
             for record in session.query(Position).filter(Position.symbols == 'BTC').all():
+                qty = round(record.quantity, 5)  # ✅ fix precision
+                if qty <= 0:
+                    continue
                 current_price = client_get_quote(record.symbols)
                 percentage_change = ((current_price - record.avg_price) / record.avg_price * 100) if current_price and record.avg_price else 0
                 color = GREEN if percentage_change >= 0 else RED
                 price_color = GREEN if current_price >= 0 else RED
-                print(f"{record.symbols} | {record.quantity:.4f} | ${record.avg_price:.2f} | {record.purchase_date} | {price_color}${current_price:.2f}{RESET} | {color}{percentage_change:.2f}%{RESET}")
+                print(f"{record.symbols} | {qty:.5f} | ${record.avg_price:.2f} | {record.purchase_date} | {price_color}${current_price:.2f}{RESET} | {color}{percentage_change:.2f}%{RESET}")
         except Exception as e:
             logging.error(f"Error printing database: {e}")
             print(f"Error printing database: {e}")
