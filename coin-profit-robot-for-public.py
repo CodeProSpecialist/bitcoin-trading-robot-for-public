@@ -610,24 +610,7 @@ def list_owned_positions():
         logging.info("No valid positions to display")
         return []
 
-    equity_positions = [pos for pos in position_list if pos['type'] == 'EQUITY']
     crypto_positions = [pos for pos in position_list if pos['type'] == 'CRYPTO']
-
-    print("\nEquity Owned Positions:")
-    if equity_positions:
-        for i, pos in enumerate(equity_positions, 1):
-            sym = pos['symbol']
-            qty = pos['qty']
-            avg_price = pos['avg_price']
-            current_price = pos['current_price']
-            gain_percentage = pos['gain_percentage']
-            price_display = f"{current_price:.2f}" if current_price is not None else 'N/A'
-            gain_color = GREEN if gain_percentage and gain_percentage >= 0 else RED
-            gain_display = f"{gain_percentage:.2f}%" if gain_percentage is not None else 'N/A'
-            print(f"{i}. {sym} - {qty:.5f} shares at avg price ${avg_price:.2f}, "
-                  f"Current price: ${price_display}, Gain: {gain_color}{gain_display}{RESET}")
-    else:
-        print("No equity positions.")
 
     print("\nCrypto Owned Positions:")
     if crypto_positions:
