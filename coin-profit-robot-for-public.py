@@ -1725,7 +1725,7 @@ def main_loop():
         print("Failed to initialize token and account. Exiting.")
         logging.error("Failed to initialize token and account. Exiting.")
         return
-    cleanup_invalid_positions()  # Clean up invalid positions at startup
+    # cleanup_invalid_positions()  # Clean up invalid positions at startup
     sync_db_with_api()  # Initial sync
     symbols_to_sell_dict = load_positions_from_database()
     if PRINT_ROBOT_STORED_BUY_AND_SELL_LIST_DATABASE:
