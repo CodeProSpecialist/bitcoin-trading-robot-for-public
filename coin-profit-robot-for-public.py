@@ -491,18 +491,19 @@ def client_list_positions():
             sym = p.get('instrument', {}).get('symbol')
             if sym != 'BTC':
                 continue  # Only process BTC
-            qty = float(p.get('quantity', 0))
+            qty = round(float(p.get('quantity', 0)), 5)  # ✅ Fix: round to 5 decimals
+            if qty <= 0:
+                continue  # Skip empty or dust positions
             avg = round(float(p.get('costBasis', {}).get('unitCost', 0)), 2)
             opened_at = p.get('openedAt', datetime.now(eastern).strftime("%Y-%m-%d"))
             try:
                 date_str = datetime.fromisoformat(opened_at.replace('Z', '+00:00')).astimezone(eastern).strftime("%Y-%m-%d")
             except ValueError:
                 date_str = datetime.now(eastern).strftime("%Y-%m-%d")
-            if sym and qty > 0:
-                current_price = client_get_quote(sym)
-                price_color = GREEN if current_price >= 0 else RED
-                print(f"Position: {sym} | Qty: {qty:.4f} | Avg Price: ${avg:.2f} | Current Price: {price_color}${current_price:.2f}{RESET}")
-                out.append({'symbol': sym, 'qty': qty, 'avg_entry_price': avg, 'purchase_date': date_str})
+            current_price = client_get_quote(sym)
+            price_color = GREEN if current_price >= 0 else RED
+            print(f"Position: {sym} | Qty: {qty:.5f} | Avg Price: ${avg:.2f} | Current Price: {price_color}${current_price:.2f}{RESET}")
+            out.append({'symbol': sym, 'qty': qty, 'avg_entry_price': avg, 'purchase_date': date_str})
         return out
     except Exception as e:
         logging.error(f"Positions fetch error: {e}")
@@ -527,12 +528,11 @@ def sync_db_with_api():
                         logging.error("All retries failed for syncing DB with API.")
                         return
             api_symbols = {pos['symbol'] for pos in api_positions}
-            positions_to_delete = []
             for pos in api_positions:
                 symbol = pos['symbol']
                 if symbol != 'BTC':
-                    continue  # Only sync BTC
-                qty = pos['qty']
+                    continue
+                qty = round(pos['qty'], 5)
                 avg_price = pos['avg_entry_price']
                 purchase_date = pos['purchase_date']
                 db_pos = session.query(Position).filter_by(symbols=symbol).first()
@@ -547,14 +547,12 @@ def sync_db_with_api():
                         purchase_date=purchase_date
                     )
                     session.add(db_pos)
+            # Only delete BTC position if essentially zero
             for db_pos in session.query(Position).all():
-                if db_pos.symbols not in api_symbols and db_pos.quantity <= 0:
-                    positions_to_delete.append(db_pos)
-            time.sleep(5)
-            for db_pos in positions_to_delete:
-                if db_pos.stop_order_id:
-                    client_cancel_order({'orderId': db_pos.stop_order_id, 'instrument': {'symbol': db_pos.symbols}})
-                session.delete(db_pos)
+                if db_pos.symbols == "BTC" and db_pos.quantity <= 0.00001:
+                    if db_pos.stop_order_id:
+                        client_cancel_order({'orderId': db_pos.stop_order_id, 'instrument': {'symbol': db_pos.symbols}})
+                    session.delete(db_pos)
             session.commit()
             print("Database synced with API for BTC.")
         except Exception as e:
