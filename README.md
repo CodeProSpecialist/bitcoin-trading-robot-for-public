@@ -1,6 +1,5 @@
 # Digital Coin Trading Robot for Public
 
-( # this project is not ready because it is under construction )
 
 Built with Precision
 
