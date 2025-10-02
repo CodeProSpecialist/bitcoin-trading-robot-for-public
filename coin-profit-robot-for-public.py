@@ -1508,6 +1508,12 @@ def sell_cryptos():
                 else:
                     avg_price = db_avg_price
                     logging.info(f"Falling back to DB avg_price for {sym}: ${db_avg_price:.8f}")
+                # Check if current price is at least 0.5% above average bought price
+                price_threshold = avg_price * 1.005  # 0.5% increase
+                if current_price < price_threshold:
+                    print(f"{sym}: Current price ${current_price:.8f} is below 0.5% above avg price ${avg_price:.8f} (threshold ${price_threshold:.8f}). Skipping sell.")
+                    logging.info(f"{sym}: Current price ${current_price:.8f} is below 0.5% above avg price ${avg_price:.8f} (threshold ${price_threshold:.8f}). Skipping sell.")
+                    continue
                 profit_pct = api_pos.get('gain_percentage')
                 if profit_pct is None:
                     profit_pct = ((current_price - avg_price) / avg_price * 100) if avg_price >= MIN_PRICE else 0
