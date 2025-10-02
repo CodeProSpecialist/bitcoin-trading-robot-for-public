@@ -1642,8 +1642,8 @@ def main_loop():
             else:
                 print("Outside trading hours. Waiting...")
                 logging.info("Outside trading hours. Waiting")
-            print(f"Waiting 5 minutes before next check at {datetime.now(eastern).strftime('%Y-%m-%d %H:%M:%S %Z')}...")
-            time.sleep(300)  # Wait 5 minutes
+            print(f"Waiting 45 seconds before next check at {datetime.now(eastern).strftime('%Y-%m-%d %H:%M:%S %Z')}...")
+            time.sleep(45)  # Wait 45 seconds
         except KeyboardInterrupt:
             print("\nTrading bot stopped by user.")
             logging.info("Trading bot stopped by user")
