@@ -1,5 +1,8 @@
 # Digital Coin Trading Robot for Public
 
+# This is a work in progress. 
+# This python code is almost finished 
+# and finalized. 
 
 Built with Precision
 
